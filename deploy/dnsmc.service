@@ -1,0 +1,15 @@
+[Unit]
+Description=DNS over Minecraft server
+After=network.target
+
+[Service]
+Type=simple
+User=dnsmc
+ExecStart=/usr/local/bin/dnsmc -S -config /etc/dnsmc/config.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

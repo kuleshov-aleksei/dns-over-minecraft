@@ -1,0 +1,51 @@
+listen: ":25565"
+suffix: ".mc"
+server:
+  motd: "§aDNS over Minecraft §7| §fRecursive resolver §7| §eAdd server with suffix .mc"
+  versionName: "1.21.4"
+  versionProtocol: 769
+  maxPlayers: 20
+  onlinePlayers: 1
+  sample:
+    - name: "§eDNS §7is §aready"
+      id: "00000000-0000-0000-0000-000000000001"
+    - name: "§7Query via §fbase32+§7.suffix §7in Server Address"
+      id: "00000000-0000-0000-0000-000000000002"
+  favicon: "" # data:image/png;base64,...
+cache:
+  size: 2048
+  ttl: 5m
+  negativeTtl: 30s
+upstreams:
+  - name: "1.1.1.1-tcp"
+    type: tcp
+    addr: "1.1.1.1:53"
+    priority: 5
+    timeout: 2s
+  - name: "cloudflare-doh"
+    type: doh
+    url: "https://cloudflare-dns.com/dns-query"
+    priority: 10
+    timeout: 2s
+  - name: "google-doh"
+    type: doh
+    url: "https://dns.google/dns-query"
+    priority: 15
+    timeout: 2s
+  # - name: "cloudflare-dot"
+  #   type: dot
+  #   addr: "1.1.1.1:853"
+  #   sni: "cloudflare-dns.com"
+  #   priority: 6
+  #   timeout: 2s
+customRecords:
+  - name: "mybox.mc"
+    type: A
+    ttl: 300
+    values: ["10.0.0.5"]
+  - name: "*.internal.mc"
+    type: A
+    values: ["192.168.1.1"]
+  - name: "hello.mc"
+    type: TXT
+    values: ['"hello from minecraft dns"']
