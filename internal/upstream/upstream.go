@@ -22,7 +22,7 @@ func NewPool(ups []Upstream) *Pool {
 		if ups[i].Priority() == ups[j].Priority() {
 			return ups[i].Name() < ups[j].Name()
 		}
-		return ups[i].Priority() < ups[j].Priority()
+		return ups[i].Priority() > ups[j].Priority()
 	})
 	return &Pool{upstreams: ups}
 }
