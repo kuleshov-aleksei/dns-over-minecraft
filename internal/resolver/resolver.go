@@ -10,72 +10,63 @@ import (
 )
 
 type Resolver struct {
-	cache   *cache.Cache
-	records *records.Store
-	pool    *upstream.Pool
+	cacheStore  *cache.Cache
+	recordStore *records.Store
+	upstreamPool *upstream.Pool
 }
 
-func New(c *cache.Cache, s *records.Store, p *upstream.Pool) *Resolver {
-	return &Resolver{cache: c, records: s, pool: p}
+func New(cacheStore *cache.Cache, recordStore *records.Store, upstreamPool *upstream.Pool) *Resolver {
+	return &Resolver{cacheStore: cacheStore, recordStore: recordStore, upstreamPool: upstreamPool}
 }
 
-func (r *Resolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	if len(q.Question) == 0 {
-		resp := new(dns.Msg)
-		resp.SetReply(q)
-		resp.Rcode = dns.RcodeFormatError
-		return resp, nil
+func (resolverInstance *Resolver) Resolve(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	if len(queryMessage.Question) == 0 {
+		errorResponse := new(dns.Msg)
+		errorResponse.SetReply(queryMessage)
+		errorResponse.Rcode = dns.RcodeFormatError
+		return errorResponse, nil
 	}
-	question := q.Question[0]
+	question := queryMessage.Question[0]
 
-	// 1. cache
-	if r.cache != nil {
-		if cached, ok := r.cache.Get(question); ok {
-			cached.Id = q.Id
-			cached.Question = q.Question
-			return cached, nil
+	if resolverInstance.cacheStore != nil {
+		if cachedResponse, exists := resolverInstance.cacheStore.Get(question); exists {
+			cachedResponse.Id = queryMessage.Id
+			cachedResponse.Question = queryMessage.Question
+			return cachedResponse, nil
 		}
 	}
 
-	// 2. custom records (authoritative)
-	if r.records != nil {
-		if rrs, authoritative := r.records.Lookup(question); authoritative {
-			resp := new(dns.Msg)
-			resp.SetReply(q)
-			resp.Authoritative = true
-			resp.RecursionAvailable = true
-			if len(rrs) > 0 {
-				resp.Answer = rrs
-			} else {
-				// NODATA? For MVP return NOERROR empty or NXDOMAIN if name not found?
-				// If wildcard/exact matched but no type, we signal NODATA (NOERROR empty)
-				// If Store said authoritative but no RRs, return NOERROR empty
-				// To allow NXDOMAIN for custom block, user can create no records and we treat as NXDOMAIN?
-				// For now NOERROR empty (NODATA)
+	if resolverInstance.recordStore != nil {
+		if resourceRecords, authoritative := resolverInstance.recordStore.Lookup(question); authoritative {
+			responseMessage := new(dns.Msg)
+			responseMessage.SetReply(queryMessage)
+			responseMessage.Authoritative = true
+			responseMessage.RecursionAvailable = true
+			if len(resourceRecords) > 0 {
+				responseMessage.Answer = resourceRecords
 			}
-			if r.cache != nil {
-				r.cache.Set(question, resp)
+			if resolverInstance.cacheStore != nil {
+				resolverInstance.cacheStore.Set(question, responseMessage)
 			}
-			return resp, nil
+			return responseMessage, nil
 		}
 	}
 
-	// 3. upstream pool
-	if r.pool == nil || len(r.pool.List()) == 0 {
-		resp := new(dns.Msg)
-		resp.SetReply(q)
-		resp.Rcode = dns.RcodeServerFailure
-		return resp, nil
+	if resolverInstance.upstreamPool == nil || len(resolverInstance.upstreamPool.List()) == 0 {
+		errorResponse := new(dns.Msg)
+		errorResponse.SetReply(queryMessage)
+		errorResponse.Rcode = dns.RcodeServerFailure
+		return errorResponse, nil
 	}
-	resp, err := r.pool.Exchange(ctx, q)
+	upstreamResponse, err := resolverInstance.upstreamPool.Exchange(requestContext, queryMessage)
 	if err != nil {
-		fail := new(dns.Msg)
-		fail.SetReply(q)
-		fail.Rcode = dns.RcodeServerFailure
-		return fail, nil
+		failureResponse := new(dns.Msg)
+		failureResponse.SetReply(queryMessage)
+		failureResponse.Rcode = dns.RcodeServerFailure
+		return failureResponse, nil
 	}
-	if r.cache != nil {
-		r.cache.Set(question, resp)
+	if resolverInstance.cacheStore != nil {
+		resolverInstance.cacheStore.Set(question, upstreamResponse)
 	}
-	return resp, nil
+	return upstreamResponse, nil
 }

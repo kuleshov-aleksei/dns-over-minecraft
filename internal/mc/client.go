@@ -11,107 +11,99 @@ import (
 	"github.com/miekg/dns"
 )
 
-func Query(addr, suffix string, q *dns.Msg) (*dns.Msg, error) {
-	enc, err := dnscodec.EncodeQuery(q)
+func Query(serverAddress string, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+	encodedQuery, err := dnscodec.EncodeQuery(queryMessage)
 	if err != nil {
 		return nil, err
 	}
-	serverAddress := enc
+	fullServerAddress := encodedQuery
 	if suffix != "" {
-		serverAddress = enc + suffix
-		// ensure suffix starts with dot
+		fullServerAddress = encodedQuery + suffix
 		if suffix[0] != '.' {
-			serverAddress = enc + "." + suffix
+			fullServerAddress = encodedQuery + "." + suffix
 		}
 	}
-	if len(serverAddress) > 255 {
-		return nil, fmt.Errorf("encoded query too long (%d > 255), qname too large for vanilla", len(serverAddress))
+	if len(fullServerAddress) > 255 {
+		return nil, fmt.Errorf("encoded query too long (%d > 255), qname too large for vanilla", len(fullServerAddress))
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	connection, err := net.DialTimeout("tcp", serverAddress, 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// handshake
-	hs := Handshake{
+	handshake := Handshake{
 		ProtocolVersion: 765,
-		ServerAddress:   serverAddress,
+		ServerAddress:   fullServerAddress,
 		ServerPort:      25565,
 		NextState:       1,
 	}
-	if _, err := conn.Write(EncodeHandshake(hs)); err != nil {
+	if _, err := connection.Write(EncodeHandshake(handshake)); err != nil {
 		return nil, err
 	}
-	if _, err := conn.Write(EncodeStatusRequest()); err != nil {
+	if _, err := connection.Write(EncodeStatusRequest()); err != nil {
 		return nil, err
 	}
 
-	// read status response
-	pid, payload, err := ReadFrame(conn)
+	packetID, payload, err := ReadFrame(connection)
 	if err != nil {
 		return nil, err
 	}
-	if pid != 0x00 {
-		return nil, fmt.Errorf("unexpected packet id %d", pid)
+	if packetID != 0x00 {
+		return nil, fmt.Errorf("unexpected packet id %d", packetID)
 	}
-	// payload is either len-prefixed json or raw json
 	var jsonBytes []byte
-	// try to handle both: if payload starts with '{', it's raw; else VarInt len + json
 	if len(payload) > 0 && payload[0] == '{' {
 		jsonBytes = payload
 	} else {
-		// read VarInt length
-		r := newByteReader(payload)
-		length, _, err := ReadVarInt(r)
+		byteReader := newByteReader(payload)
+		length, _, err := ReadVarInt(byteReader)
 		if err == nil {
-			rest, _ := io.ReadAll(r)
-			if len(rest) >= length {
-				jsonBytes = rest[:length]
+			remainingBytes, _ := io.ReadAll(byteReader)
+			if len(remainingBytes) >= length {
+				jsonBytes = remainingBytes[:length]
 			} else {
-				jsonBytes = rest
+				jsonBytes = remainingBytes
 			}
 		} else {
 			jsonBytes = payload
 		}
 	}
 
-	var sr StatusResponse
-	if err := json.Unmarshal(jsonBytes, &sr); err != nil {
+	var statusResponse StatusResponse
+	if err := json.Unmarshal(jsonBytes, &statusResponse); err != nil {
 		return nil, fmt.Errorf("unmarshal status: %w body=%s", err, string(jsonBytes))
 	}
-	if sr.Description.Text == "" {
+	if statusResponse.Description.Text == "" {
 		return nil, fmt.Errorf("empty description in response")
 	}
-	resp, err := dnscodec.DecodeResponse(sr.Description.Text)
+	responseMessage, err := dnscodec.DecodeResponse(statusResponse.Description.Text)
 	if err != nil {
 		return nil, fmt.Errorf("decode dns response: %w", err)
 	}
-	resp.Id = q.Id
+	responseMessage.Id = queryMessage.Id
 
-	// ping/pong to cleanly close (optional)
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	_, _ = conn.Write(EncodePing(time.Now().UnixMilli()))
-	// ignore pong
+	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+	_, _ = connection.Write(EncodePing(time.Now().UnixMilli()))
 
-	return resp, nil
+	return responseMessage, nil
 }
 
 // helper to implement io.Reader for VarInt
 type byteReader struct {
-	data []byte
-	pos  int
+	data     []byte
+	position int
 }
 
-func newByteReader(b []byte) *byteReader { return &byteReader{data: b} }
-func (b *byteReader) Read(p []byte) (int, error) {
-	if b.pos >= len(b.data) {
+func newByteReader(buffer []byte) *byteReader { return &byteReader{data: buffer} }
+func (byteReaderInstance *byteReader) Read(destination []byte) (int, error) {
+	if byteReaderInstance.position >= len(byteReaderInstance.data) {
 		return 0, io.EOF
 	}
-	n := copy(p, b.data[b.pos:])
-	b.pos += n
-	return n, nil
+	bytesCopied := copy(destination, byteReaderInstance.data[byteReaderInstance.position:])
+	byteReaderInstance.position += bytesCopied
+	return bytesCopied, nil
 }
-func (b *byteReader) Len() int { return len(b.data) - b.pos }
+func (byteReaderInstance *byteReader) Len() int { return len(byteReaderInstance.data) - byteReaderInstance.position }

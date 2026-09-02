@@ -39,7 +39,7 @@ type CacheConfig struct {
 
 type Upstream struct {
 	Name     string        `yaml:"name"`
-	Type     string        `yaml:"type"` // tcp, dot, doh
+	Type     string        `yaml:"type"`
 	Addr     string        `yaml:"addr"`
 	URL      string        `yaml:"url"`
 	SNI      string        `yaml:"sni"`
@@ -83,53 +83,49 @@ func Default() Config {
 	}
 }
 
-func Load(path string) (Config, error) {
-	cfg := Default()
-	if path == "" {
-		path = "config.yaml"
+func Load(configPath string) (Config, error) {
+	configuration := Default()
+	if configPath == "" {
+		configPath = "config.yaml"
 	}
-	b, err := os.ReadFile(path)
+	fileBytes, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil
+			return configuration, nil
 		}
-		return cfg, err
+		return configuration, err
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return cfg, err
+	if err := yaml.Unmarshal(fileBytes, &configuration); err != nil {
+		return configuration, err
 	}
-	// defaults for zero values
-	if cfg.Listen == "" {
-		cfg.Listen = ":25565"
+	if configuration.Listen == "" {
+		configuration.Listen = ":25565"
 	}
-	if cfg.Server.MOTD == "" {
-		cfg.Server.MOTD = "§aDNS over Minecraft §7| §fRecursive resolver"
+	if configuration.Server.MOTD == "" {
+		configuration.Server.MOTD = "§aDNS over Minecraft §7| §fRecursive resolver"
 	}
-	if cfg.Server.VersionName == "" {
-		cfg.Server.VersionName = "1.21.4"
+	if configuration.Server.VersionName == "" {
+		configuration.Server.VersionName = "1.21.4"
 	}
-	if cfg.Server.VersionProtocol == 0 {
-		cfg.Server.VersionProtocol = 769
+	if configuration.Server.VersionProtocol == 0 {
+		configuration.Server.VersionProtocol = 769
 	}
-	if cfg.Server.MaxPlayers == 0 {
-		cfg.Server.MaxPlayers = 20
+	if configuration.Server.MaxPlayers == 0 {
+		configuration.Server.MaxPlayers = 20
 	}
-	if cfg.Server.Sample == nil {
-		cfg.Server.Sample = []SamplePlayer{
+	if configuration.Server.Sample == nil {
+		configuration.Server.Sample = []SamplePlayer{
 			{Name: "§eDNS §7is §aready", ID: "00000000-0000-0000-0000-000000000001"},
 		}
 	}
-	if cfg.Cache.TTL == 0 {
-		cfg.Cache.TTL = 5 * time.Minute
+	if configuration.Cache.TTL == 0 {
+		configuration.Cache.TTL = 5 * time.Minute
 	}
-	if cfg.Cache.NegativeTTL == 0 {
-		cfg.Cache.NegativeTTL = 30 * time.Second
+	if configuration.Cache.NegativeTTL == 0 {
+		configuration.Cache.NegativeTTL = 30 * time.Second
 	}
-	if cfg.Cache.Size == 0 {
-		cfg.Cache.Size = 2048
+	if configuration.Cache.Size == 0 {
+		configuration.Cache.Size = 2048
 	}
-	if cfg.Suffix == "" {
-		// allow empty to mean no suffix; keep as is
-	}
-	return cfg, nil
+	return configuration, nil
 }

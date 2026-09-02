@@ -12,44 +12,44 @@ import (
 )
 
 var (
-	b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
-	b64 = base64.StdEncoding
+	base32Encoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+	base64Encoding = base64.StdEncoding
 )
 
 // EncodeQuery packs dns.Msg to wire and encodes as base32 for serverAddress.
-func EncodeQuery(msg *dns.Msg) (string, error) {
-	wire, err := msg.Pack()
+func EncodeQuery(queryMessage *dns.Msg) (string, error) {
+	wireBytes, err := queryMessage.Pack()
 	if err != nil {
 		return "", err
 	}
-	enc := b32.EncodeToString(wire)
-	return strings.ToLower(enc), nil
+	encodedQuery := base32Encoding.EncodeToString(wireBytes)
+	return strings.ToLower(encodedQuery), nil
 }
 
 // DecodeQuery decodes serverAddress (with suffix already stripped) to dns.Msg.
 // Handles dotted chunking (e.g. "abcd.efgh.mc" where bare was split into labels <=63).
-func DecodeQuery(enc string, suffix string) (*dns.Msg, error) {
+func DecodeQuery(encodedQuery string, suffix string) (*dns.Msg, error) {
 	if suffix != "" {
-		if strings.HasSuffix(strings.ToLower(enc), strings.ToLower(suffix)) {
-			enc = enc[:len(enc)-len(suffix)]
-			enc = strings.TrimSuffix(enc, ".")
+		if strings.HasSuffix(strings.ToLower(encodedQuery), strings.ToLower(suffix)) {
+			encodedQuery = encodedQuery[:len(encodedQuery)-len(suffix)]
+			encodedQuery = strings.TrimSuffix(encodedQuery, ".")
 		}
 	}
 	// Remove label dots inserted for >63 char enc (hosts/DNS label limit)
-	enc = strings.ReplaceAll(enc, ".", "")
-	enc = strings.ToUpper(enc)
-	wire, err := b32.DecodeString(enc)
+	encodedQuery = strings.ReplaceAll(encodedQuery, ".", "")
+	encodedQuery = strings.ToUpper(encodedQuery)
+	wireBytes, err := base32Encoding.DecodeString(encodedQuery)
 	if err != nil {
-		return nil, fmt.Errorf("base32 decode: %w (input %q len %d, want base32(packed dns.Msg))", err, enc, len(enc))
+		return nil, fmt.Errorf("base32 decode: %w (input %q len %d, want base32(packed dns.Msg))", err, encodedQuery, len(encodedQuery))
 	}
-	if len(wire) < 12 {
-		return nil, fmt.Errorf("wire too short %d bytes (want >=12 header): dns: overflow unpacking uint16", len(wire))
+	if len(wireBytes) < 12 {
+		return nil, fmt.Errorf("wire too short %d bytes (want >=12 header): dns: overflow unpacking uint16", len(wireBytes))
 	}
-	msg := new(dns.Msg)
-	if err := msg.Unpack(wire); err != nil {
-		return nil, fmt.Errorf("%w (wire %d bytes, hex %x)", err, len(wire), wire)
+	decodedMessage := new(dns.Msg)
+	if err := decodedMessage.Unpack(wireBytes); err != nil {
+		return nil, fmt.Errorf("%w (wire %d bytes, hex %x)", err, len(wireBytes), wireBytes)
 	}
-	return msg, nil
+	return decodedMessage, nil
 }
 
 // StripSuffix removes suffix and trailing dot, returns bare encoded string (may contain dots for chunked).
@@ -57,48 +57,46 @@ func StripSuffix(serverAddress, suffix string) string {
 	if suffix == "" {
 		return serverAddress
 	}
-	suffix = strings.ToLower(suffix)
-	lower := strings.ToLower(serverAddress)
-	if strings.HasSuffix(lower, suffix) {
-		trimmed := serverAddress[:len(serverAddress)-len(suffix)]
-		trimmed = strings.TrimSuffix(trimmed, ".")
-		return trimmed
+	lowerSuffix := strings.ToLower(suffix)
+	lowerServerAddress := strings.ToLower(serverAddress)
+	if strings.HasSuffix(lowerServerAddress, lowerSuffix) {
+		trimmedAddress := serverAddress[:len(serverAddress)-len(suffix)]
+		trimmedAddress = strings.TrimSuffix(trimmedAddress, ".")
+		return trimmedAddress
 	}
 	return serverAddress
 }
 
 // EncodeResponse encodes dns.Msg wire to base64 for JSON description.
-func EncodeResponse(msg *dns.Msg) (string, error) {
-	wire, err := msg.Pack()
+func EncodeResponse(responseMessage *dns.Msg) (string, error) {
+	wireBytes, err := responseMessage.Pack()
 	if err != nil {
 		return "", err
 	}
-	return b64.EncodeToString(wire), nil
+	return base64Encoding.EncodeToString(wireBytes), nil
 }
 
 // DecodeResponse decodes base64 string from description to dns.Msg.
-func DecodeResponse(s string) (*dns.Msg, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
+func DecodeResponse(encodedResponse string) (*dns.Msg, error) {
+	encodedResponse = strings.TrimSpace(encodedResponse)
+	if encodedResponse == "" {
 		return nil, errors.New("empty response")
 	}
-	wire, err := b64.DecodeString(s)
+	wireBytes, err := base64Encoding.DecodeString(encodedResponse)
 	if err != nil {
 		return nil, err
 	}
-	msg := new(dns.Msg)
-	if err := msg.Unpack(wire); err != nil {
+	decodedMessage := new(dns.Msg)
+	if err := decodedMessage.Unpack(wireBytes); err != nil {
 		return nil, err
 	}
-	return msg, nil
+	return decodedMessage, nil
 }
 
 // BuildStatusJSON builds the MC status JSON with base64 response in description.
-func BuildStatusJSON(b64Response string) []byte {
-	// Escape JSON via simple template; b64 is safe (no quotes)
-	// Use players.sample for no extra data
-	j := `{"version":{"name":"dnsmc","protocol":765},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"` + b64Response + `"}}`
-	return []byte(j)
+func BuildStatusJSON(base64Response string) []byte {
+	statusJSON := `{"version":{"name":"dnsmc","protocol":765},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"` + base64Response + `"}}`
+	return []byte(statusJSON)
 }
 
 // BuildVanillaStatusJSON builds a vanilla-friendly status response for real MC clients.
@@ -122,29 +120,29 @@ func BuildVanillaStatusJSON(motd, versionName string, protocol, maxPlayers, onli
 		} `json:"description"`
 		Favicon string `json:"favicon,omitempty"`
 	}
-	var s status
-	s.Version.Name = versionName
-	s.Version.Protocol = protocol
-	s.Players.Max = maxPlayers
-	s.Players.Online = onlinePlayers
-	for _, e := range sample {
-		s.Players.Sample = append(s.Players.Sample, sampleEntry{Name: e["name"], ID: e["id"]})
+	var statusResponse status
+	statusResponse.Version.Name = versionName
+	statusResponse.Version.Protocol = protocol
+	statusResponse.Players.Max = maxPlayers
+	statusResponse.Players.Online = onlinePlayers
+	for _, sampleEntryMap := range sample {
+		statusResponse.Players.Sample = append(statusResponse.Players.Sample, sampleEntry{Name: sampleEntryMap["name"], ID: sampleEntryMap["id"]})
 	}
-	if s.Players.Sample == nil {
-		s.Players.Sample = []sampleEntry{}
+	if statusResponse.Players.Sample == nil {
+		statusResponse.Players.Sample = []sampleEntry{}
 	}
-	s.Description.Text = motd
-	s.Favicon = favicon
-	b, _ := json.Marshal(s)
-	return b
+	statusResponse.Description.Text = motd
+	statusResponse.Favicon = favicon
+	jsonBytes, _ := json.Marshal(statusResponse)
+	return jsonBytes
 }
 
 // BuildErrorResponse builds a DNS error response (FORMERR etc).
-func BuildErrorResponse(query *dns.Msg, rcode int) *dns.Msg {
-	resp := new(dns.Msg)
-	if query != nil {
-		resp.SetReply(query)
+func BuildErrorResponse(queryMessage *dns.Msg, responseCode int) *dns.Msg {
+	errorResponse := new(dns.Msg)
+	if queryMessage != nil {
+		errorResponse.SetReply(queryMessage)
 	}
-	resp.Rcode = rcode
-	return resp
+	errorResponse.Rcode = responseCode
+	return errorResponse
 }

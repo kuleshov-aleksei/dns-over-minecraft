@@ -21,15 +21,15 @@ type fakeUpstream struct {
 	hits int
 }
 
-func (fake *fakeUpstream) Name() string { return fake.name }
-func (fake *fakeUpstream) Priority() int { return fake.priority }
-func (fake *fakeUpstream) Exchange(ctx context.Context, message *dns.Msg) (*dns.Msg, error) {
-	fake.hits++
-	if fake.err != nil {
-		return nil, fake.err
+func (fakeUpstreamInstance *fakeUpstream) Name() string { return fakeUpstreamInstance.name }
+func (fakeUpstreamInstance *fakeUpstream) Priority() int { return fakeUpstreamInstance.priority }
+func (fakeUpstreamInstance *fakeUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	fakeUpstreamInstance.hits++
+	if fakeUpstreamInstance.err != nil {
+		return nil, fakeUpstreamInstance.err
 	}
-	if fake.response != nil {
-		return fake.response.Copy(), nil
+	if fakeUpstreamInstance.response != nil {
+		return fakeUpstreamInstance.response.Copy(), nil
 	}
 	return nil, nil
 }

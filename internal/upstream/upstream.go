@@ -10,46 +10,45 @@ import (
 type Upstream interface {
 	Name() string
 	Priority() int
-	Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
+	Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error)
 }
 
 type Pool struct {
-	upstreams []Upstream
+	upstreamList []Upstream
 }
 
-func NewPool(ups []Upstream) *Pool {
-	sort.Slice(ups, func(i, j int) bool {
-		if ups[i].Priority() == ups[j].Priority() {
-			return ups[i].Name() < ups[j].Name()
+func NewPool(upstreamList []Upstream) *Pool {
+	sort.Slice(upstreamList, func(firstIndex, secondIndex int) bool {
+		if upstreamList[firstIndex].Priority() == upstreamList[secondIndex].Priority() {
+			return upstreamList[firstIndex].Name() < upstreamList[secondIndex].Name()
 		}
-		return ups[i].Priority() > ups[j].Priority()
+		return upstreamList[firstIndex].Priority() > upstreamList[secondIndex].Priority()
 	})
-	return &Pool{upstreams: ups}
+	return &Pool{upstreamList: upstreamList}
 }
 
-func (p *Pool) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	var lastErr error
-	for _, u := range p.upstreams {
+func (poolInstance *Pool) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	var lastError error
+	for _, upstreamInstance := range poolInstance.upstreamList {
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-requestContext.Done():
+			return nil, requestContext.Err()
 		default:
 		}
-		resp, err := u.Exchange(ctx, msg)
-		if err == nil && resp != nil {
-			return resp, nil
+		responseMessage, err := upstreamInstance.Exchange(requestContext, queryMessage)
+		if err == nil && responseMessage != nil {
+			return responseMessage, nil
 		}
 		if err != nil {
-			lastErr = err
+			lastError = err
 		} else {
-			lastErr = nil
+			lastError = nil
 		}
-		// try next priority
 	}
-	if lastErr != nil {
-		return nil, lastErr
+	if lastError != nil {
+		return nil, lastError
 	}
 	return nil, context.DeadlineExceeded
 }
 
-func (p *Pool) List() []Upstream { return p.upstreams }
+func (poolInstance *Pool) List() []Upstream { return poolInstance.upstreamList }

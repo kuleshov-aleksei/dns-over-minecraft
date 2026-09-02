@@ -15,104 +15,93 @@ type Record struct {
 }
 
 type Store struct {
-	// exact map: lower(name) -> qtype -> []RR
-	exact map[string]map[uint16][]dns.RR
-	// wildcard suffix: e.g. "*.internal.mc" -> suffix "internal.mc"
+	exact     map[string]map[uint16][]dns.RR
 	wildcards []wildcard
 }
 
 type wildcard struct {
-	suffix string
-	qtype  uint16
-	rrs    []dns.RR
+	suffix        string
+	queryType     uint16
+	resourceRecords []dns.RR
 }
 
-func New(recs []Record) (*Store, error) {
-	s := &Store{
+func New(inputRecords []Record) (*Store, error) {
+	recordStore := &Store{
 		exact: make(map[string]map[uint16][]dns.RR),
 	}
-	for _, r := range recs {
-		qtype, ok := dns.StringToType[strings.ToUpper(r.Type)]
-		if !ok {
+	for _, record := range inputRecords {
+		queryType, exists := dns.StringToType[strings.ToUpper(record.Type)]
+		if !exists {
 			continue
 		}
-		ttl := r.TTL
-		if ttl == 0 {
-			ttl = 300
+		timeToLive := record.TTL
+		if timeToLive == 0 {
+			timeToLive = 300
 		}
-		if strings.HasPrefix(r.Name, "*.") {
-			suffix := strings.ToLower(strings.TrimPrefix(r.Name, "*."))
+		if strings.HasPrefix(record.Name, "*.") {
+			suffix := strings.ToLower(strings.TrimPrefix(record.Name, "*."))
 			suffix = dns.Fqdn(suffix)
-			var rrs []dns.RR
-			for _, v := range r.Values {
-				rrStr := dns.Fqdn(r.Name) + " " + strconv.FormatUint(uint64(ttl), 10) + " IN " + r.Type + " " + v
-				// For wildcard, use synthesized name later; create template with "*"
-				rr, err := dns.NewRR(rrStr)
+			var wildcardRecords []dns.RR
+			for _, value := range record.Values {
+				recordString := dns.Fqdn(record.Name) + " " + strconv.FormatUint(uint64(timeToLive), 10) + " IN " + record.Type + " " + value
+				resourceRecord, err := dns.NewRR(recordString)
 				if err != nil {
 					continue
 				}
-				rrs = append(rrs, rr)
+				wildcardRecords = append(wildcardRecords, resourceRecord)
 			}
-			s.wildcards = append(s.wildcards, wildcard{suffix: suffix, qtype: qtype, rrs: rrs})
+			recordStore.wildcards = append(recordStore.wildcards, wildcard{suffix: suffix, queryType: queryType, resourceRecords: wildcardRecords})
 			continue
 		}
-		fqdn := dns.Fqdn(strings.ToLower(r.Name))
-		for _, v := range r.Values {
-			rrStr := fqdn + " " + strconv.FormatUint(uint64(ttl), 10) + " IN " + r.Type + " " + v
-			rr, err := dns.NewRR(rrStr)
+		fullyQualifiedName := dns.Fqdn(strings.ToLower(record.Name))
+		for _, value := range record.Values {
+			recordString := fullyQualifiedName + " " + strconv.FormatUint(uint64(timeToLive), 10) + " IN " + record.Type + " " + value
+			resourceRecord, err := dns.NewRR(recordString)
 			if err != nil {
 				continue
 			}
-			if s.exact[fqdn] == nil {
-				s.exact[fqdn] = make(map[uint16][]dns.RR)
+			if recordStore.exact[fullyQualifiedName] == nil {
+				recordStore.exact[fullyQualifiedName] = make(map[uint16][]dns.RR)
 			}
-			s.exact[fqdn][qtype] = append(s.exact[fqdn][qtype], rr)
+			recordStore.exact[fullyQualifiedName][queryType] = append(recordStore.exact[fullyQualifiedName][queryType], resourceRecord)
 		}
-		// Also handle CNAME etc needing exact match on name
 	}
-	return s, nil
+	return recordStore, nil
 }
 
 // Lookup returns RRs if custom record matches. Second return true if authoritative (we own the name).
-func (s *Store) Lookup(q dns.Question) ([]dns.RR, bool) {
-	fqdn := dns.Fqdn(strings.ToLower(q.Name))
-	// exact
-	if m, ok := s.exact[fqdn]; ok {
-		if rrs, ok := m[q.Qtype]; ok && len(rrs) > 0 {
-			// return copies with correct name? already correct
-			out := make([]dns.RR, len(rrs))
-			for i, rr := range rrs {
-				out[i] = dns.Copy(rr)
+func (recordStore *Store) Lookup(question dns.Question) ([]dns.RR, bool) {
+	fullyQualifiedName := dns.Fqdn(strings.ToLower(question.Name))
+	if typeMap, exists := recordStore.exact[fullyQualifiedName]; exists {
+		if matchedRecords, exists := typeMap[question.Qtype]; exists && len(matchedRecords) > 0 {
+			resultRecords := make([]dns.RR, len(matchedRecords))
+			for index, resourceRecord := range matchedRecords {
+				resultRecords[index] = dns.Copy(resourceRecord)
 			}
-			return out, true
+			return resultRecords, true
 		}
-		// CNAME handling: if we have CNAME for this name, return it regardless of qtype
-		if cnameRRs, ok := m[dns.TypeCNAME]; ok && len(cnameRRs) > 0 && q.Qtype != dns.TypeCNAME {
-			out := make([]dns.RR, len(cnameRRs))
-			for i, rr := range cnameRRs {
-				out[i] = dns.Copy(rr)
+		if cnameRecords, exists := typeMap[dns.TypeCNAME]; exists && len(cnameRecords) > 0 && question.Qtype != dns.TypeCNAME {
+			resultRecords := make([]dns.RR, len(cnameRecords))
+			for index, resourceRecord := range cnameRecords {
+				resultRecords[index] = dns.Copy(resourceRecord)
 			}
-			return out, true
+			return resultRecords, true
 		}
-		// name exists but type not found -> NODATA (authoritative empty)
 		return nil, true
 	}
-	// wildcard
-	for _, w := range s.wildcards {
-		if w.qtype != q.Qtype && w.qtype != dns.TypeCNAME {
+	for _, wildcardEntry := range recordStore.wildcards {
+		if wildcardEntry.queryType != question.Qtype && wildcardEntry.queryType != dns.TypeCNAME {
 			continue
 		}
-		if strings.HasSuffix(fqdn, w.suffix) || fqdn == w.suffix {
-			// ensure not exact match already handled and is subdomain
-			// produce RRs with q.Name as owner
-			var out []dns.RR
-			for _, rr := range w.rrs {
-				cp := dns.Copy(rr)
-				cp.Header().Name = dns.Fqdn(q.Name)
-				out = append(out, cp)
+		if strings.HasSuffix(fullyQualifiedName, wildcardEntry.suffix) || fullyQualifiedName == wildcardEntry.suffix {
+			var resultRecords []dns.RR
+			for _, resourceRecord := range wildcardEntry.resourceRecords {
+				copiedRecord := dns.Copy(resourceRecord)
+				copiedRecord.Header().Name = dns.Fqdn(question.Name)
+				resultRecords = append(resultRecords, copiedRecord)
 			}
-			if len(out) > 0 {
-				return out, true
+			if len(resultRecords) > 0 {
+				return resultRecords, true
 			}
 		}
 	}

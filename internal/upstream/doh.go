@@ -18,7 +18,7 @@ type DoH struct {
 	client   *http.Client
 }
 
-func NewDoH(name, url string, priority int, timeout time.Duration) *DoH {
+func NewDoH(name string, url string, priority int, timeout time.Duration) *DoH {
 	if timeout == 0 {
 		timeout = 2 * time.Second
 	}
@@ -31,44 +31,43 @@ func NewDoH(name, url string, priority int, timeout time.Duration) *DoH {
 	}
 }
 
-func (d *DoH) Name() string  { return d.name }
-func (d *DoH) Priority() int { return d.priority }
+func (dohUpstream *DoH) Name() string  { return dohUpstream.name }
+func (dohUpstream *DoH) Priority() int { return dohUpstream.priority }
 
-func (d *DoH) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	wire, err := msg.Pack()
+func (dohUpstream *DoH) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	wireBytes, err := queryMessage.Pack()
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", d.url, bytes.NewReader(wire))
+	httpRequest, err := http.NewRequestWithContext(requestContext, "POST", dohUpstream.url, bytes.NewReader(wireBytes))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/dns-message")
-	req.Header.Set("Accept", "application/dns-message")
+	httpRequest.Header.Set("Content-Type", "application/dns-message")
+	httpRequest.Header.Set("Accept", "application/dns-message")
 
-	// also apply timeout from context
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < d.timeout && remaining > 0 {
-			d.client.Timeout = remaining
+	if deadline, exists := requestContext.Deadline(); exists {
+		remainingDuration := time.Until(deadline)
+		if remainingDuration < dohUpstream.timeout && remainingDuration > 0 {
+			dohUpstream.client.Timeout = remainingDuration
 		}
 	}
 
-	resp, err := d.client.Do(req)
+	httpResponse, err := dohUpstream.client.Do(httpRequest)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode != http.StatusOK {
 		return nil, io.ErrUnexpectedEOF
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	responseBody, err := io.ReadAll(io.LimitReader(httpResponse.Body, 1<<16))
 	if err != nil {
 		return nil, err
 	}
-	out := new(dns.Msg)
-	if err := out.Unpack(body); err != nil {
+	decodedResponse := new(dns.Msg)
+	if err := decodedResponse.Unpack(responseBody); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return decodedResponse, nil
 }

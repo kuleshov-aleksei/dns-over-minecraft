@@ -15,7 +15,6 @@ type Server struct {
 	Addr     string
 	Suffix   string
 	Resolver *resolver.Resolver
-	// Vanilla appearance
 	MOTD            string
 	VersionName     string
 	VersionProtocol int
@@ -25,132 +24,122 @@ type Server struct {
 	Favicon         string
 }
 
-func (s *Server) ListenAndServe(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.Addr)
+func (serverInstance *Server) ListenAndServe(requestContext context.Context) error {
+	listener, err := net.Listen("tcp", serverInstance.Addr)
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
-	log.Printf("dnsmc server listening on %s (suffix=%q)", s.Addr, s.Suffix)
+	defer listener.Close()
+	log.Printf("dnsmc server listening on %s (suffix=%q)", serverInstance.Addr, serverInstance.Suffix)
 
 	go func() {
-		<-ctx.Done()
-		ln.Close()
+		<-requestContext.Done()
+		listener.Close()
 	}()
 
 	for {
-		conn, err := ln.Accept()
+		connection, err := listener.Accept()
 		if err != nil {
 			select {
-			case <-ctx.Done():
+			case <-requestContext.Done():
 				return nil
 			default:
 				log.Printf("accept error: %v", err)
 				continue
 			}
 		}
-		go s.handleConn(conn)
+		go serverInstance.handleConn(connection)
 	}
 }
 
-func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+func (serverInstance *Server) handleConn(connection net.Conn) {
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// 1. Handshake
-	pid, payload, err := ReadFrame(conn)
+	packetID, payload, err := ReadFrame(connection)
 	if err != nil {
 		return
 	}
-	if pid != 0x00 {
+	if packetID != 0x00 {
 		return
 	}
-	hs, err := ParseHandshake(payload)
+	handshake, err := ParseHandshake(payload)
 	if err != nil {
 		return
 	}
-	if hs.NextState != 1 {
+	if handshake.NextState != 1 {
 		return
 	}
 
-	// 2. Status Request
-	pid, payload, err = ReadFrame(conn)
+	packetID, payload, err = ReadFrame(connection)
 	if err != nil {
 		return
 	}
-	if pid != 0x00 {
-		// allow ping without status request? require status
+	if packetID != 0x00 {
 		return
 	}
 	_ = payload
 
-	// 3. Decode DNS query from serverAddress
-	bare := dnscodec.StripSuffix(hs.ServerAddress, s.Suffix)
-	query, err := dnscodec.DecodeQuery(bare, "")
+	bareAddress := dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix)
+	queryMessage, err := dnscodec.DecodeQuery(bareAddress, "")
 	if err != nil {
-		// Distinguish vanilla ping vs malformed DNS query:
-		// If serverAddress ends with suffix, it was intended as DNS query -> FORMERR
-		// Otherwise it's a real Minecraft client -> vanilla MOTD.
-		hasSuffix := s.Suffix != "" && dnscodec.StripSuffix(hs.ServerAddress, s.Suffix) != hs.ServerAddress
+		hasSuffix := serverInstance.Suffix != "" && dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix) != handshake.ServerAddress
 		if hasSuffix {
-			bareLen := len(dnscodec.StripSuffix(hs.ServerAddress, s.Suffix))
-			log.Printf("decode failed for DNS query %q (bare %d chars): %v -- hint: generate with 'dnsmc encode <name> [type]' (want base32(packed dns.Msg)+suffix)", hs.ServerAddress, bareLen, err)
-			q := dnscodec.BuildErrorResponse(nil, 1) // FORMERR
-			b64, _ := dnscodec.EncodeResponse(q)
-			rawJSON := dnscodec.BuildStatusJSON(b64)
-			_, _ = conn.Write(EncodeStatusResponseJSON(rawJSON))
-			s.handlePing(conn)
+			bareLength := len(dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix))
+			log.Printf("decode failed for DNS query %q (bare %d chars): %v -- hint: generate with 'dnsmc encode <name> [type]' (want base32(packed dns.Msg)+suffix)", handshake.ServerAddress, bareLength, err)
+			errorResponse := dnscodec.BuildErrorResponse(nil, 1)
+			base64Response, _ := dnscodec.EncodeResponse(errorResponse)
+			rawJSON := dnscodec.BuildStatusJSON(base64Response)
+			_, _ = connection.Write(EncodeStatusResponseJSON(rawJSON))
+			serverInstance.handlePing(connection)
 			return
 		}
-		log.Printf("vanilla ping from %s (serverAddress=%q)", conn.RemoteAddr(), hs.ServerAddress)
+		log.Printf("vanilla ping from %s (serverAddress=%q)", connection.RemoteAddr(), handshake.ServerAddress)
 		vanillaJSON := dnscodec.BuildVanillaStatusJSON(
-			s.MOTD, s.VersionName, s.VersionProtocol,
-			s.MaxPlayers, s.OnlinePlayers, s.Sample, s.Favicon,
+			serverInstance.MOTD, serverInstance.VersionName, serverInstance.VersionProtocol,
+			serverInstance.MaxPlayers, serverInstance.OnlinePlayers, serverInstance.Sample, serverInstance.Favicon,
 		)
-		_, _ = conn.Write(EncodeStatusResponseJSON(vanillaJSON))
-		s.handlePing(conn)
+		_, _ = connection.Write(EncodeStatusResponseJSON(vanillaJSON))
+		serverInstance.handlePing(connection)
 		return
 	}
 
-	// 4. Resolve
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	resp, err := s.Resolver.Resolve(ctx, query)
+	timeoutContext, cancelFunc := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancelFunc()
+	responseMessage, err := serverInstance.Resolver.Resolve(timeoutContext, queryMessage)
 	if err != nil {
-		resp = dnscodec.BuildErrorResponse(query, 2) // SERVFAIL
+		responseMessage = dnscodec.BuildErrorResponse(queryMessage, 2)
 	}
-	b64, err := dnscodec.EncodeResponse(resp)
+	base64Response, err := dnscodec.EncodeResponse(responseMessage)
 	if err != nil {
-		b64, _ = dnscodec.EncodeResponse(dnscodec.BuildErrorResponse(query, 2))
+		base64Response, _ = dnscodec.EncodeResponse(dnscodec.BuildErrorResponse(queryMessage, 2))
 	}
-	rawJSON := dnscodec.BuildStatusJSON(b64)
+	rawJSON := dnscodec.BuildStatusJSON(base64Response)
 
-	// Validate JSON
-	var js json.RawMessage
-	if json.Unmarshal(rawJSON, &js) != nil {
+	var jsonRawMessage json.RawMessage
+	if json.Unmarshal(rawJSON, &jsonRawMessage) != nil {
 		log.Printf("invalid json generated")
 		return
 	}
 
-	if _, err := conn.Write(EncodeStatusResponseJSON(rawJSON)); err != nil {
+	if _, err := connection.Write(EncodeStatusResponseJSON(rawJSON)); err != nil {
 		return
 	}
 
-	// 5. Optional Ping/Pong
-	s.handlePing(conn)
+	serverInstance.handlePing(connection)
 }
 
-func (s *Server) handlePing(conn net.Conn) {
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	pid, payload, err := ReadFrame(conn)
+func (serverInstance *Server) handlePing(connection net.Conn) {
+	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+	packetID, payload, err := ReadFrame(connection)
 	if err != nil {
 		return
 	}
-	if pid == 0x01 {
-		ts, err := DecodePing(payload)
+	if packetID == 0x01 {
+		timestamp, err := DecodePing(payload)
 		if err != nil {
 			return
 		}
-		_, _ = conn.Write(EncodePong(ts))
+		_, _ = connection.Write(EncodePong(timestamp))
 	}
 }

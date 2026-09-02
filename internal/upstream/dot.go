@@ -10,37 +10,37 @@ import (
 
 type DoT struct {
 	name     string
-	addr     string
+	address  string
 	sni      string
 	priority int
 	timeout  time.Duration
 }
 
-func NewDoT(name, addr, sni string, priority int, timeout time.Duration) *DoT {
+func NewDoT(name string, address string, sni string, priority int, timeout time.Duration) *DoT {
 	if timeout == 0 {
 		timeout = 2 * time.Second
 	}
-	return &DoT{name: name, addr: addr, sni: sni, priority: priority, timeout: timeout}
+	return &DoT{name: name, address: address, sni: sni, priority: priority, timeout: timeout}
 }
 
-func (d *DoT) Name() string  { return d.name }
-func (d *DoT) Priority() int { return d.priority }
+func (dotUpstream *DoT) Name() string  { return dotUpstream.name }
+func (dotUpstream *DoT) Priority() int { return dotUpstream.priority }
 
-func (d *DoT) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	c := &dns.Client{
+func (dotUpstream *DoT) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	dnsClient := &dns.Client{
 		Net:     "tcp-tls",
-		Timeout: d.timeout,
+		Timeout: dotUpstream.timeout,
 		TLSConfig: &tls.Config{
-			ServerName: d.sni,
+			ServerName: dotUpstream.sni,
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < d.timeout && remaining > 0 {
-			c.Timeout = remaining
+	if deadline, exists := requestContext.Deadline(); exists {
+		remainingDuration := time.Until(deadline)
+		if remainingDuration < dotUpstream.timeout && remainingDuration > 0 {
+			dnsClient.Timeout = remainingDuration
 		}
 	}
-	resp, _, err := c.ExchangeContext(ctx, msg, d.addr)
-	return resp, err
+	responseMessage, _, err := dnsClient.ExchangeContext(requestContext, queryMessage, dotUpstream.address)
+	return responseMessage, err
 }

@@ -8,34 +8,34 @@ import (
 )
 
 // Frame is VarInt(length) + payload (PacketID + data)
-func ReadFrame(r io.Reader) (packetID int, payload []byte, err error) {
-	length, _, err := ReadVarInt(r)
+func ReadFrame(reader io.Reader) (packetID int, payload []byte, err error) {
+	length, _, err := ReadVarInt(reader)
 	if err != nil {
 		return 0, nil, err
 	}
-	if length <= 0 || length > 1<<20 { // 1MB cap
+	if length <= 0 || length > 1<<20 {
 		return 0, nil, errors.New("frame length out of bounds")
 	}
-	buf := make([]byte, length)
-	if _, err := io.ReadFull(r, buf); err != nil {
+	frameBuffer := make([]byte, length)
+	if _, err := io.ReadFull(reader, frameBuffer); err != nil {
 		return 0, nil, err
 	}
-	br := bytes.NewReader(buf)
-	packetID, _, err = ReadVarInt(br)
+	bufferReader := bytes.NewReader(frameBuffer)
+	packetID, _, err = ReadVarInt(bufferReader)
 	if err != nil {
 		return 0, nil, err
 	}
-	remaining, _ := io.ReadAll(br)
-	return packetID, remaining, nil
+	remainingBytes, _ := io.ReadAll(bufferReader)
+	return packetID, remainingBytes, nil
 }
 
 func WriteFrame(packetID int, data []byte) []byte {
-	pid := WriteVarInt(packetID)
-	frameLen := len(pid) + len(data)
-	out := WriteVarInt(frameLen)
-	out = append(out, pid...)
-	out = append(out, data...)
-	return out
+	packetIDBytes := WriteVarInt(packetID)
+	frameLength := len(packetIDBytes) + len(data)
+	lengthPrefix := WriteVarInt(frameLength)
+	lengthPrefix = append(lengthPrefix, packetIDBytes...)
+	lengthPrefix = append(lengthPrefix, data...)
+	return lengthPrefix
 }
 
 // Handshake packet (client -> server, state 0)
@@ -47,38 +47,38 @@ type Handshake struct {
 }
 
 func ParseHandshake(payload []byte) (*Handshake, error) {
-	r := bytes.NewReader(payload)
-	proto, _, err := ReadVarInt(r)
+	payloadReader := bytes.NewReader(payload)
+	protocolVersion, _, err := ReadVarInt(payloadReader)
 	if err != nil {
 		return nil, err
 	}
-	addr, err := ReadString(r)
+	serverAddress, err := ReadString(payloadReader)
 	if err != nil {
 		return nil, err
 	}
-	port, err := ReadUShort(r)
+	serverPort, err := ReadUShort(payloadReader)
 	if err != nil {
 		return nil, err
 	}
-	nextState, _, err := ReadVarInt(r)
+	nextState, _, err := ReadVarInt(payloadReader)
 	if err != nil {
 		return nil, err
 	}
 	return &Handshake{
-		ProtocolVersion: proto,
-		ServerAddress:   addr,
-		ServerPort:      port,
+		ProtocolVersion: protocolVersion,
+		ServerAddress:   serverAddress,
+		ServerPort:      serverPort,
 		NextState:       nextState,
 	}, nil
 }
 
-func EncodeHandshake(h Handshake) []byte {
-	var buf bytes.Buffer
-	buf.Write(WriteVarInt(h.ProtocolVersion))
-	buf.Write(WriteString(h.ServerAddress))
-	buf.Write(WriteUShort(h.ServerPort))
-	buf.Write(WriteVarInt(h.NextState))
-	return WriteFrame(0x00, buf.Bytes())
+func EncodeHandshake(handshake Handshake) []byte {
+	var buffer bytes.Buffer
+	buffer.Write(WriteVarInt(handshake.ProtocolVersion))
+	buffer.Write(WriteString(handshake.ServerAddress))
+	buffer.Write(WriteUShort(handshake.ServerPort))
+	buffer.Write(WriteVarInt(handshake.NextState))
+	return WriteFrame(0x00, buffer.Bytes())
 }
 
 func EncodeStatusRequest() []byte {
@@ -92,12 +92,12 @@ func DecodePing(payload []byte) (int64, error) {
 	return int64(binary.BigEndian.Uint64(payload)), nil
 }
 
-func EncodePing(ts int64) []byte {
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(ts))
-	return WriteFrame(0x01, buf)
+func EncodePing(timestamp int64) []byte {
+	timestampBuffer := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBuffer, uint64(timestamp))
+	return WriteFrame(0x01, timestampBuffer)
 }
 
-func EncodePong(ts int64) []byte {
-	return EncodePing(ts)
+func EncodePong(timestamp int64) []byte {
+	return EncodePing(timestamp)
 }

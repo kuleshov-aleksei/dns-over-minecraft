@@ -24,12 +24,12 @@ import (
 
 func main() {
 	var (
-		serverMode = flag.Bool("S", false, "run as server")
-		listen     = flag.String("listen", "", "listen addr (server mode)")
-		cfgPath    = flag.String("config", "config.yaml", "config file path")
-		suffix     = flag.String("suffix", "", "suffix override (e.g. .mc)")
-		serverAddr = flag.String("server", "127.0.0.1:25565", "server addr for client query")
-		ipFlag     = flag.String("ip", "127.0.0.1", "IP for hosts command")
+		serverMode     = flag.Bool("S", false, "run as server")
+		listenAddress  = flag.String("listen", "", "listen addr (server mode)")
+		configPath     = flag.String("config", "config.yaml", "config file path")
+		suffixOverride = flag.String("suffix", "", "suffix override (e.g. .mc)")
+		serverAddress  = flag.String("server", "127.0.0.1:25565", "server addr for client query")
+		ipFlag         = flag.String("ip", "127.0.0.1", "IP for hosts command")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage:
@@ -53,164 +53,160 @@ Examples:
 	flag.Parse()
 
 	if *serverMode {
-		runServer(*cfgPath, *listen, *suffix)
+		runServer(*configPath, *listenAddress, *suffixOverride)
 		return
 	}
 
-	args := flag.Args()
-	if len(args) == 0 {
+	arguments := flag.Args()
+	if len(arguments) == 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// helper subcommands
-	switch strings.ToLower(args[0]) {
+	switch strings.ToLower(arguments[0]) {
 	case "encode":
-		runEncode(args[1:], *cfgPath, *suffix)
+		runEncode(arguments[1:], *configPath, *suffixOverride)
 		return
 	case "decode":
-		runDecode(args[1:])
+		runDecode(arguments[1:])
 		return
 	case "hosts":
-		runHosts(args[1:], *cfgPath, *suffix, *ipFlag)
+		runHosts(arguments[1:], *configPath, *suffixOverride, *ipFlag)
 		return
 	}
 
-	// client mode: <name> [type]
-	name := args[0]
-	qtypeStr := "A"
-	if len(args) > 1 {
-		qtypeStr = args[1]
+	domainName := arguments[0]
+	queryTypeString := "A"
+	if len(arguments) > 1 {
+		queryTypeString = arguments[1]
 	}
-	qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
-	if !ok {
-		log.Fatalf("unknown qtype %q", qtypeStr)
+	queryType, exists := dns.StringToType[strings.ToUpper(queryTypeString)]
+	if !exists {
+		log.Fatalf("unknown qtype %q", queryTypeString)
 	}
 
-	// suffix for client: try config suffix else default .mc
-	effSuffix := effectiveSuffix(*cfgPath, *suffix)
+	effectiveSuffix := effectiveSuffix(*configPath, *suffixOverride)
 
-	q := new(dns.Msg)
-	q.SetQuestion(dns.Fqdn(name), qtype)
-	q.RecursionDesired = true
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn(domainName), queryType)
+	queryMessage.RecursionDesired = true
 
-	resp, err := mc.Query(*serverAddr, effSuffix, q)
+	responseMessage, err := mc.Query(*serverAddress, effectiveSuffix, queryMessage)
 	if err != nil {
 		log.Fatalf("query failed: %v", err)
 	}
-	fmt.Printf(";; response: %s\n", dns.RcodeToString[resp.Rcode])
-	for _, rr := range resp.Answer {
-		fmt.Println(rr.String())
+	fmt.Printf(";; response: %s\n", dns.RcodeToString[responseMessage.Rcode])
+	for _, resourceRecord := range responseMessage.Answer {
+		fmt.Println(resourceRecord.String())
 	}
-	if len(resp.Answer) == 0 {
+	if len(responseMessage.Answer) == 0 {
 		fmt.Println(";; no answer")
-		if len(resp.Ns) > 0 {
+		if len(responseMessage.Ns) > 0 {
 			fmt.Println(";; authority:")
-			for _, rr := range resp.Ns {
-				fmt.Println(rr.String())
+			for _, resourceRecord := range responseMessage.Ns {
+				fmt.Println(resourceRecord.String())
 			}
 		}
 	}
 }
 
-func effectiveSuffix(cfgPath, suffixOverride string) string {
+func effectiveSuffix(configPath, suffixOverride string) string {
 	if suffixOverride != "" {
 		return suffixOverride
 	}
-	if cfg, err := config.Load(cfgPath); err == nil && cfg.Suffix != "" {
-		return cfg.Suffix
+	if loadedConfig, err := config.Load(configPath); err == nil && loadedConfig.Suffix != "" {
+		return loadedConfig.Suffix
 	}
 	return ".mc"
 }
 
-func runEncode(args []string, cfgPath, suffixOverride string) {
-	if len(args) == 0 {
+func runEncode(arguments []string, configPath, suffixOverride string) {
+	if len(arguments) == 0 {
 		log.Fatalf("encode usage: dnsmc encode <name> [type]")
 	}
-	name := args[0]
-	qtypeStr := "A"
-	if len(args) > 1 {
-		qtypeStr = args[1]
+	domainName := arguments[0]
+	queryTypeString := "A"
+	if len(arguments) > 1 {
+		queryTypeString = arguments[1]
 	}
-	qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
-	if !ok {
-		log.Fatalf("unknown qtype %q", qtypeStr)
+	queryType, exists := dns.StringToType[strings.ToUpper(queryTypeString)]
+	if !exists {
+		log.Fatalf("unknown qtype %q", queryTypeString)
 	}
-	effSuffix := effectiveSuffix(cfgPath, suffixOverride)
-	q := new(dns.Msg)
-	q.SetQuestion(dns.Fqdn(name), qtype)
-	q.RecursionDesired = true
-	q.Id = 0
-	enc, err := dnscodec.EncodeQuery(q)
+	effectiveSuffix := effectiveSuffix(configPath, suffixOverride)
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn(domainName), queryType)
+	queryMessage.RecursionDesired = true
+	queryMessage.Id = 0
+	encodedQuery, err := dnscodec.EncodeQuery(queryMessage)
 	if err != nil {
 		log.Fatalf("encode: %v", err)
 	}
-	full := enc + effSuffix
-	// dotted chunking for labels >63
-	chunked := chunkBase32(enc) + effSuffix
-	fmt.Printf("bare:    %s\n", enc)
-	fmt.Printf("full:    %s\n", full)
-	if chunked != full {
-		fmt.Printf("chunked: %s  (labels <=63, use if full >63 per label)\n", chunked)
+	fullAddress := encodedQuery + effectiveSuffix
+	chunkedAddress := chunkBase32(encodedQuery) + effectiveSuffix
+	fmt.Printf("bare:    %s\n", encodedQuery)
+	fmt.Printf("full:    %s\n", fullAddress)
+	if chunkedAddress != fullAddress {
+		fmt.Printf("chunked: %s  (labels <=63, use if full >63 per label)\n", chunkedAddress)
 	}
-	fmt.Printf("hosts:   127.0.0.1  %s\n", full)
-	fmt.Printf("len:     %d (bare) + %d (suffix) = %d / 255 max ServerAddress\n", len(enc), len(effSuffix), len(full))
-	if len(full) > 255 {
+	fmt.Printf("hosts:   127.0.0.1  %s\n", fullAddress)
+	fmt.Printf("len:     %d (bare) + %d (suffix) = %d / 255 max ServerAddress\n", len(encodedQuery), len(effectiveSuffix), len(fullAddress))
+	if len(fullAddress) > 255 {
 		fmt.Printf("WARN: exceeds 255 char ServerAddress limit, query will fail with FORMERR\n")
 	}
-	if len(enc) > 63 && !strings.Contains(enc, ".") {
+	if len(encodedQuery) > 63 && !strings.Contains(encodedQuery, ".") {
 		fmt.Printf("NOTE: bare >63 chars, some resolvers/hosts may reject single label. Use chunked form.\n")
 	}
 }
 
-func runHosts(args []string, cfgPath, suffixOverride, ip string) {
-	if len(args) == 0 {
+func runHosts(arguments []string, configPath, suffixOverride, ipAddress string) {
+	if len(arguments) == 0 {
 		log.Fatalf("hosts usage: dnsmc hosts <name> [type]")
 	}
-	name := args[0]
-	qtypeStr := "A"
-	if len(args) > 1 {
-		qtypeStr = args[1]
+	domainName := arguments[0]
+	queryTypeString := "A"
+	if len(arguments) > 1 {
+		queryTypeString = arguments[1]
 	}
-	qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
-	if !ok {
-		log.Fatalf("unknown qtype %q", qtypeStr)
+	queryType, exists := dns.StringToType[strings.ToUpper(queryTypeString)]
+	if !exists {
+		log.Fatalf("unknown qtype %q", queryTypeString)
 	}
-	effSuffix := effectiveSuffix(cfgPath, suffixOverride)
-	q := new(dns.Msg)
-	q.SetQuestion(dns.Fqdn(name), qtype)
-	q.RecursionDesired = true
-	q.Id = 0
-	enc, err := dnscodec.EncodeQuery(q)
+	effectiveSuffix := effectiveSuffix(configPath, suffixOverride)
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn(domainName), queryType)
+	queryMessage.RecursionDesired = true
+	queryMessage.Id = 0
+	encodedQuery, err := dnscodec.EncodeQuery(queryMessage)
 	if err != nil {
 		log.Fatalf("encode: %v", err)
 	}
-	full := enc + effSuffix
-	fmt.Printf("%s  %s\n", ip, full)
+	fullAddress := encodedQuery + effectiveSuffix
+	fmt.Printf("%s  %s\n", ipAddress, fullAddress)
 }
 
-func chunkBase32(enc string) string {
-	if len(enc) <= 63 {
-		return enc
+func chunkBase32(encodedQuery string) string {
+	if len(encodedQuery) <= 63 {
+		return encodedQuery
 	}
 	var parts []string
-	for len(enc) > 63 {
-		parts = append(parts, enc[:63])
-		enc = enc[63:]
+	for len(encodedQuery) > 63 {
+		parts = append(parts, encodedQuery[:63])
+		encodedQuery = encodedQuery[63:]
 	}
-	parts = append(parts, enc)
+	parts = append(parts, encodedQuery)
 	return strings.Join(parts, ".")
 }
 
-func isBase32Like(s string) bool {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(strings.ToLower(s), ".mc")
-	s = strings.ReplaceAll(s, ".", "")
-	if s == "" {
+func isBase32Like(input string) bool {
+	normalizedInput := strings.TrimSpace(input)
+	normalizedInput = strings.TrimSuffix(strings.ToLower(normalizedInput), ".mc")
+	normalizedInput = strings.ReplaceAll(normalizedInput, ".", "")
+	if normalizedInput == "" {
 		return false
 	}
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '2' && r <= '7') {
+	for _, character := range normalizedInput {
+		if (character >= 'a' && character <= 'z') || (character >= '2' && character <= '7') {
 			continue
 		}
 		return false
@@ -218,139 +214,132 @@ func isBase32Like(s string) bool {
 	return true
 }
 
-func runDecode(args []string) {
-	if len(args) == 0 {
+func runDecode(arguments []string) {
+	if len(arguments) == 0 {
 		log.Fatalf("decode usage: dnsmc decode <base64>")
 	}
-	// allow base64 with or without surrounding whitespace/quotes
-	raw := strings.Join(args, "")
-	raw = strings.TrimSpace(strings.Trim(raw, "\"'"))
-	// also handle full JSON {"description":{"text":"..."}}
-	if strings.Contains(raw, "{") {
-		var m map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &m); err == nil {
-			if d, ok := m["description"].(map[string]interface{}); ok {
-				if t, ok := d["text"].(string); ok && t != "" {
-					raw = t
+	rawInput := strings.Join(arguments, "")
+	rawInput = strings.TrimSpace(strings.Trim(rawInput, "\"'"))
+	if strings.Contains(rawInput, "{") {
+		var jsonMap map[string]interface{}
+		if err := json.Unmarshal([]byte(rawInput), &jsonMap); err == nil {
+			if descriptionMap, exists := jsonMap["description"].(map[string]interface{}); exists {
+				if textValue, exists := descriptionMap["text"].(string); exists && textValue != "" {
+					rawInput = textValue
 				}
 			}
 		}
 	}
-	// Heuristic: if input looks like base32 query (only A-Z2-7 + dots), treat as query
-	isB32Like := isBase32Like(raw)
-	if isB32Like {
-		if q, errQ := dnscodec.DecodeQuery(raw, ""); errQ == nil {
+	isBase32Input := isBase32Like(rawInput)
+	if isBase32Input {
+		if decodedQuery, err := dnscodec.DecodeQuery(rawInput, ""); err == nil {
 			fmt.Printf(";; decoded as QUERY (base32) not response - you pasted the ServerAddress, not description.text:\n")
-			fmt.Printf(";; question: %s\n", q.Question[0].String())
-			fmt.Printf("%s\n", q.String())
+			fmt.Printf(";; question: %s\n", decodedQuery.Question[0].String())
+			fmt.Printf("%s\n", decodedQuery.String())
 			return
 		} else {
-			// Wire too short is the exact user error from /etc/hosts
-			if strings.Contains(errQ.Error(), "wire too short") {
-				log.Fatalf("decode: not a response, looks like an invalid query (base32) %q: %v\nHint: 'm5xw6z3mmuxgg33n' is 10 bytes wire (want >=12). Generate correct hosts entry with: dnsmc encode <name> [type]", raw, errQ)
+			if strings.Contains(err.Error(), "wire too short") {
+				log.Fatalf("decode: not a response, looks like an invalid query (base32) %q: %v\nHint: 'm5xw6z3mmuxgg33n' is 10 bytes wire (want >=12). Generate correct hosts entry with: dnsmc encode <name> [type]", rawInput, err)
 			}
 		}
 	}
-	msg, err := dnscodec.DecodeResponse(raw)
+	decodedResponse, err := dnscodec.DecodeResponse(rawInput)
 	if err != nil {
-		if qErr, _ := dnscodec.DecodeQuery(raw, ""); qErr != nil {
-			log.Fatalf("decode: response base64 error: %v (input len %d); also not valid query: %v\nHint: for vanilla simulation, 'encode' gives ServerAddress to put in /etc/hosts; 'decode' expects base64 from Server List description.text, not the hostname.", err, len(raw), qErr)
+		if queryErr, _ := dnscodec.DecodeQuery(rawInput, ""); queryErr != nil {
+			log.Fatalf("decode: response base64 error: %v (input len %d); also not valid query: %v\nHint: for vanilla simulation, 'encode' gives ServerAddress to put in /etc/hosts; 'decode' expects base64 from Server List description.text, not the hostname.", err, len(rawInput), queryErr)
 		}
-		log.Fatalf("decode: %v (input len %d)", err, len(raw))
+		log.Fatalf("decode: %v (input len %d)", err, len(rawInput))
 	}
-	fmt.Printf(";; response: %s\n", dns.RcodeToString[msg.Rcode])
-	fmt.Printf("%s\n", msg.String())
-	for _, rr := range msg.Answer {
-		fmt.Println(rr.String())
+	fmt.Printf(";; response: %s\n", dns.RcodeToString[decodedResponse.Rcode])
+	fmt.Printf("%s\n", decodedResponse.String())
+	for _, resourceRecord := range decodedResponse.Answer {
+		fmt.Println(resourceRecord.String())
 	}
-	for _, rr := range msg.Ns {
-		fmt.Println(rr.String())
+	for _, resourceRecord := range decodedResponse.Ns {
+		fmt.Println(resourceRecord.String())
 	}
-	for _, rr := range msg.Extra {
-		fmt.Println(rr.String())
+	for _, resourceRecord := range decodedResponse.Extra {
+		fmt.Println(resourceRecord.String())
 	}
 }
 
-func runServer(cfgPath, listenOverride, suffixOverride string) {
-	cfg, err := config.Load(cfgPath)
+func runServer(configPath, listenOverride, suffixOverride string) {
+	loadedConfig, err := config.Load(configPath)
 	if err != nil {
 		log.Fatalf("config load: %v", err)
 	}
 	if listenOverride != "" {
-		cfg.Listen = listenOverride
+		loadedConfig.Listen = listenOverride
 	}
 	if suffixOverride != "" {
-		cfg.Suffix = suffixOverride
+		loadedConfig.Suffix = suffixOverride
 	}
 
-	// Build cache
-	c := cache.New(cfg.Cache.Size, cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+	cacheStore := cache.New(loadedConfig.Cache.Size, loadedConfig.Cache.TTL, loadedConfig.Cache.NegativeTTL)
 
-	// Build records
-	var recs []records.Record
-	for _, cr := range cfg.CustomRecords {
-		recs = append(recs, records.Record{Name: cr.Name, Type: cr.Type, TTL: cr.TTL, Values: cr.Values})
+	var customRecords []records.Record
+	for _, customRecord := range loadedConfig.CustomRecords {
+		customRecords = append(customRecords, records.Record{Name: customRecord.Name, Type: customRecord.Type, TTL: customRecord.TTL, Values: customRecord.Values})
 	}
-	store, _ := records.New(recs)
+	recordStore, _ := records.New(customRecords)
 
-	// Build upstream pool
-	var ups []upstream.Upstream
-	for _, u := range cfg.Upstreams {
-		timeout := u.Timeout
-		if timeout == 0 {
-			timeout = 2 * time.Second
+	var upstreamList []upstream.Upstream
+	for _, upstreamConfig := range loadedConfig.Upstreams {
+		timeoutDuration := upstreamConfig.Timeout
+		if timeoutDuration == 0 {
+			timeoutDuration = 2 * time.Second
 		}
-		switch strings.ToLower(u.Type) {
+		switch strings.ToLower(upstreamConfig.Type) {
 		case "tcp":
-			addr := u.Addr
-			if addr == "" {
-				addr = "8.8.8.8:53"
+			address := upstreamConfig.Addr
+			if address == "" {
+				address = "8.8.8.8:53"
 			}
-			ups = append(ups, upstream.NewTCP(u.Name, addr, u.Priority, timeout))
+			upstreamList = append(upstreamList, upstream.NewTCP(upstreamConfig.Name, address, upstreamConfig.Priority, timeoutDuration))
 		case "dot":
-			addr := u.Addr
-			if addr == "" {
-				addr = "1.1.1.1:853"
+			address := upstreamConfig.Addr
+			if address == "" {
+				address = "1.1.1.1:853"
 			}
-			ups = append(ups, upstream.NewDoT(u.Name, addr, u.SNI, u.Priority, timeout))
+			upstreamList = append(upstreamList, upstream.NewDoT(upstreamConfig.Name, address, upstreamConfig.SNI, upstreamConfig.Priority, timeoutDuration))
 		case "doh":
-			url := u.URL
+			url := upstreamConfig.URL
 			if url == "" {
 				url = "https://cloudflare-dns.com/dns-query"
 			}
-			ups = append(ups, upstream.NewDoH(u.Name, url, u.Priority, timeout))
+			upstreamList = append(upstreamList, upstream.NewDoH(upstreamConfig.Name, url, upstreamConfig.Priority, timeoutDuration))
 		default:
-			log.Printf("unknown upstream type %q for %q, skipping", u.Type, u.Name)
+			log.Printf("unknown upstream type %q for %q, skipping", upstreamConfig.Type, upstreamConfig.Name)
 		}
 	}
-	pool := upstream.NewPool(ups)
+	upstreamPool := upstream.NewPool(upstreamList)
 	log.Printf("upstreams (priority order):")
-	for _, u := range pool.List() {
-		log.Printf("  %d %s", u.Priority(), u.Name())
+	for _, upstreamInstance := range upstreamPool.List() {
+		log.Printf("  %d %s", upstreamInstance.Priority(), upstreamInstance.Name())
 	}
 
-	res := resolver.New(c, store, pool)
-	var sample []map[string]string
-	for _, sp := range cfg.Server.Sample {
-		sample = append(sample, map[string]string{"name": sp.Name, "id": sp.ID})
+	resolverInstance := resolver.New(cacheStore, recordStore, upstreamPool)
+	var sampleEntries []map[string]string
+	for _, samplePlayer := range loadedConfig.Server.Sample {
+		sampleEntries = append(sampleEntries, map[string]string{"name": samplePlayer.Name, "id": samplePlayer.ID})
 	}
-	srv := &mc.Server{
-		Addr:            cfg.Listen,
-		Suffix:          cfg.Suffix,
-		Resolver:        res,
-		MOTD:            cfg.Server.MOTD,
-		VersionName:     cfg.Server.VersionName,
-		VersionProtocol: cfg.Server.VersionProtocol,
-		MaxPlayers:      cfg.Server.MaxPlayers,
-		OnlinePlayers:   cfg.Server.OnlinePlayers,
-		Sample:          sample,
-		Favicon:         cfg.Server.Favicon,
+	minecraftServer := &mc.Server{
+		Addr:            loadedConfig.Listen,
+		Suffix:          loadedConfig.Suffix,
+		Resolver:        resolverInstance,
+		MOTD:            loadedConfig.Server.MOTD,
+		VersionName:     loadedConfig.Server.VersionName,
+		VersionProtocol: loadedConfig.Server.VersionProtocol,
+		MaxPlayers:      loadedConfig.Server.MaxPlayers,
+		OnlinePlayers:   loadedConfig.Server.OnlinePlayers,
+		Sample:          sampleEntries,
+		Favicon:         loadedConfig.Server.Favicon,
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelFunc()
 
-	if err := srv.ListenAndServe(ctx); err != nil {
+	if err := minecraftServer.ListenAndServe(requestContext); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 }

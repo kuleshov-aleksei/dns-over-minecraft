@@ -16,11 +16,11 @@ type fakeUpstream struct {
 	hits     int
 }
 
-func (fake *fakeUpstream) Name() string { return fake.name }
-func (fake *fakeUpstream) Priority() int { return fake.priority }
-func (fake *fakeUpstream) Exchange(ctx context.Context, message *dns.Msg) (*dns.Msg, error) {
-	fake.hits++
-	return fake.response, fake.err
+func (fakeUpstreamInstance *fakeUpstream) Name() string { return fakeUpstreamInstance.name }
+func (fakeUpstreamInstance *fakeUpstream) Priority() int { return fakeUpstreamInstance.priority }
+func (fakeUpstreamInstance *fakeUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	fakeUpstreamInstance.hits++
+	return fakeUpstreamInstance.response, fakeUpstreamInstance.err
 }
 
 func makeMessage(testingInstance *testing.T, name string) *dns.Msg {

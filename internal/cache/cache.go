@@ -8,89 +8,84 @@ import (
 )
 
 type entry struct {
-	msg     *dns.Msg
-	expires time.Time
+	message   *dns.Msg
+	expiresAt time.Time
 }
 
 type Cache struct {
-	mu          sync.RWMutex
+	mutex       sync.RWMutex
 	items       map[string]*entry
 	ttl         time.Duration
 	negativeTTL time.Duration
 	maxSize     int
 }
 
-func New(size int, ttl, negativeTTL time.Duration) *Cache {
-	if size <= 0 {
-		size = 2048
+func New(cacheSize int, cacheTTL, negativeCacheTTL time.Duration) *Cache {
+	if cacheSize <= 0 {
+		cacheSize = 2048
 	}
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
+	if cacheTTL <= 0 {
+		cacheTTL = 5 * time.Minute
 	}
-	if negativeTTL <= 0 {
-		negativeTTL = 30 * time.Second
+	if negativeCacheTTL <= 0 {
+		negativeCacheTTL = 30 * time.Second
 	}
 	return &Cache{
-		items:       make(map[string]*entry, size),
-		ttl:         ttl,
-		negativeTTL: negativeTTL,
-		maxSize:     size,
+		items:       make(map[string]*entry, cacheSize),
+		ttl:         cacheTTL,
+		negativeTTL: negativeCacheTTL,
+		maxSize:     cacheSize,
 	}
 }
 
-func cacheKey(q dns.Question) string {
-	return q.Name + "/" + dns.ClassToString[q.Qclass] + "/" + dns.TypeToString[q.Qtype]
+func cacheKey(question dns.Question) string {
+	return question.Name + "/" + dns.ClassToString[question.Qclass] + "/" + dns.TypeToString[question.Qtype]
 }
 
-func (c *Cache) Get(q dns.Question) (*dns.Msg, bool) {
-	c.mu.RLock()
-	e, ok := c.items[cacheKey(q)]
-	c.mu.RUnlock()
-	if !ok {
+func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
+	cacheInstance.mutex.RLock()
+	cachedEntry, exists := cacheInstance.items[cacheKey(question)]
+	cacheInstance.mutex.RUnlock()
+	if !exists {
 		return nil, false
 	}
-	if time.Now().After(e.expires) {
-		c.mu.Lock()
-		delete(c.items, cacheKey(q))
-		c.mu.Unlock()
+	if time.Now().After(cachedEntry.expiresAt) {
+		cacheInstance.mutex.Lock()
+		delete(cacheInstance.items, cacheKey(question))
+		cacheInstance.mutex.Unlock()
 		return nil, false
 	}
-	// return copy
-	cp := e.msg.Copy()
-	cp.Id = 0 // caller will set
-	return cp, true
+	copiedMessage := cachedEntry.message.Copy()
+	copiedMessage.Id = 0 // caller will set
+	return copiedMessage, true
 }
 
-func (c *Cache) Set(q dns.Question, msg *dns.Msg) {
-	ttl := c.ttl
-	// use TTL from answer if present and smaller
-	if len(msg.Answer) > 0 {
-		minTTL := uint32(ttl.Seconds())
-		for _, rr := range msg.Answer {
-			if rr.Header().Ttl < minTTL {
-				minTTL = rr.Header().Ttl
+func (cacheInstance *Cache) Set(question dns.Question, responseMessage *dns.Msg) {
+	computedTTL := cacheInstance.ttl
+	if len(responseMessage.Answer) > 0 {
+		minimumTTL := uint32(computedTTL.Seconds())
+		for _, resourceRecord := range responseMessage.Answer {
+			if resourceRecord.Header().Ttl < minimumTTL {
+				minimumTTL = resourceRecord.Header().Ttl
 			}
 		}
-		if time.Duration(minTTL)*time.Second < ttl {
-			ttl = time.Duration(minTTL) * time.Second
+		if time.Duration(minimumTTL)*time.Second < computedTTL {
+			computedTTL = time.Duration(minimumTTL) * time.Second
 		}
 	} else {
-		// NXDOMAIN / empty answer uses negative TTL
-		ttl = c.negativeTTL
+		computedTTL = cacheInstance.negativeTTL
 	}
-	if ttl <= 0 {
-		ttl = c.negativeTTL
+	if computedTTL <= 0 {
+		computedTTL = cacheInstance.negativeTTL
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.items) >= c.maxSize {
-		// evict one random (oldest not tracked; simple delete first)
-		for k := range c.items {
-			delete(c.items, k)
+	cacheInstance.mutex.Lock()
+	defer cacheInstance.mutex.Unlock()
+	if len(cacheInstance.items) >= cacheInstance.maxSize {
+		for key := range cacheInstance.items {
+			delete(cacheInstance.items, key)
 			break
 		}
 	}
-	// store copy
-	cp := msg.Copy()
-	c.items[cacheKey(q)] = &entry{msg: cp, expires: time.Now().Add(ttl)}
+	copiedMessage := responseMessage.Copy()
+	cacheInstance.items[cacheKey(question)] = &entry{message: copiedMessage, expiresAt: time.Now().Add(computedTTL)}
 }
