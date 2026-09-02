@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -26,31 +27,32 @@ func EncodeQuery(msg *dns.Msg) (string, error) {
 }
 
 // DecodeQuery decodes serverAddress (with suffix already stripped) to dns.Msg.
+// Handles dotted chunking (e.g. "abcd.efgh.mc" where bare was split into labels <=63).
 func DecodeQuery(enc string, suffix string) (*dns.Msg, error) {
-	// suffix handling is done by caller; here just decode
 	if suffix != "" {
 		if strings.HasSuffix(strings.ToLower(enc), strings.ToLower(suffix)) {
 			enc = enc[:len(enc)-len(suffix)]
-			// strip trailing dot
 			enc = strings.TrimSuffix(enc, ".")
-		} else {
-			// if suffix required but missing, still try decode bare
 		}
 	}
+	// Remove label dots inserted for >63 char enc (hosts/DNS label limit)
+	enc = strings.ReplaceAll(enc, ".", "")
 	enc = strings.ToUpper(enc)
-	// base32 requires upper
 	wire, err := b32.DecodeString(enc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("base32 decode: %w (input %q len %d, want base32(packed dns.Msg))", err, enc, len(enc))
+	}
+	if len(wire) < 12 {
+		return nil, fmt.Errorf("wire too short %d bytes (want >=12 header): dns: overflow unpacking uint16", len(wire))
 	}
 	msg := new(dns.Msg)
 	if err := msg.Unpack(wire); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w (wire %d bytes, hex %x)", err, len(wire), wire)
 	}
 	return msg, nil
 }
 
-// StripSuffix removes suffix and trailing dot, returns bare encoded string.
+// StripSuffix removes suffix and trailing dot, returns bare encoded string (may contain dots for chunked).
 func StripSuffix(serverAddress, suffix string) string {
 	if suffix == "" {
 		return serverAddress

@@ -93,7 +93,8 @@ func (s *Server) handleConn(conn net.Conn) {
 		// Otherwise it's a real Minecraft client -> vanilla MOTD.
 		hasSuffix := s.Suffix != "" && dnscodec.StripSuffix(hs.ServerAddress, s.Suffix) != hs.ServerAddress
 		if hasSuffix {
-			log.Printf("decode failed for DNS query %q: %v", hs.ServerAddress, err)
+			bareLen := len(dnscodec.StripSuffix(hs.ServerAddress, s.Suffix))
+			log.Printf("decode failed for DNS query %q (bare %d chars): %v -- hint: generate with 'dnsmc encode <name> [type]' (want base32(packed dns.Msg)+suffix)", hs.ServerAddress, bareLen, err)
 			q := dnscodec.BuildErrorResponse(nil, 1) // FORMERR
 			b64, _ := dnscodec.EncodeResponse(q)
 			rawJSON := dnscodec.BuildStatusJSON(b64)
