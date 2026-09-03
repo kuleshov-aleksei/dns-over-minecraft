@@ -241,6 +241,64 @@ func TestResolver_UpstreamFallbackAndCaching(testingInstance *testing.T) {
 	}
 }
 
+func TestResolver_Stats(testingInstance *testing.T) {
+	cacheStore := cache.New(10, 5*time.Minute, 30*time.Second)
+	recordStore, _ := records.New([]records.Record{
+		{Name: "mybox.mc", Type: "A", TTL: 60, Values: []string{"10.0.0.5"}},
+	})
+	upstreamPool := upstream.NewPool([]upstream.Upstream{&fakeUpstream{name: "fake", priority: 1, response: makeResponse(makeQuery(testingInstance, "other.mc", dns.TypeA, 1), nil, dns.RcodeSuccess)}})
+	resolverInstance := New(cacheStore, recordStore, upstreamPool)
+
+	firstQuery := makeQuery(testingInstance, "mybox.mc", dns.TypeA, 1)
+	secondQuery := makeQuery(testingInstance, "mybox.mc", dns.TypeA, 2)
+	thirdQuery := makeQuery(testingInstance, "other.mc", dns.TypeA, 3)
+	_, _ = resolverInstance.Resolve(context.Background(), firstQuery)
+	_, _ = resolverInstance.Resolve(context.Background(), secondQuery)
+	_, _ = resolverInstance.Resolve(context.Background(), thirdQuery)
+
+	snapshot := resolverInstance.TakeWindow()
+	if snapshot.Total != 3 || snapshot.CacheHits != 1 || snapshot.CacheMisses != 2 {
+		testingInstance.Fatalf("window got total=%d hits=%d misses=%d, want 3/1/2", snapshot.Total, snapshot.CacheHits, snapshot.CacheMisses)
+	}
+	afterReset := resolverInstance.TakeWindow()
+	if afterReset.Total != 0 || afterReset.CacheHits != 0 || afterReset.CacheMisses != 0 {
+		testingInstance.Fatalf("window not reset: %+v", afterReset)
+	}
+
+	allTime, lastWindow := resolverInstance.DomainStats(10)
+	if len(allTime) != 2 {
+		testingInstance.Fatalf("all-time domains len %d, want 2", len(allTime))
+	}
+	if allTime[0].Name != "mybox.mc." || allTime[0].Count != 2 {
+		testingInstance.Fatalf("all-time top should be mybox.mc. (2), got %+v", allTime[0])
+	}
+	if allTime[1].Name != "other.mc." || allTime[1].Count != 1 {
+		testingInstance.Fatalf("all-time second should be other.mc. (1), got %+v", allTime[1])
+	}
+	if len(lastWindow) != 2 || lastWindow[0].Name != "mybox.mc." || lastWindow[0].Count != 2 {
+		testingInstance.Fatalf("last-window should close with mybox.mc. (2) first, got %+v", lastWindow)
+	}
+
+	_, _ = resolverInstance.Resolve(context.Background(), makeQuery(testingInstance, "other.mc", dns.TypeA, 4))
+	_, lastWindowSecond := resolverInstance.DomainStats(10)
+	if len(lastWindowSecond) != 1 || lastWindowSecond[0].Name != "other.mc." || lastWindowSecond[0].Count != 1 {
+		testingInstance.Fatalf("last-window should show other.mc. (1), got %+v", lastWindowSecond)
+	}
+}
+
+func TestResolver_StatsEmptyQuestionCountsAsMiss(testingInstance *testing.T) {
+	resolverInstance := New(nil, nil, nil)
+	emptyQuery := new(dns.Msg)
+	emptyQuery.Id = 999
+	emptyQuery.RecursionDesired = true
+	_, _ = resolverInstance.Resolve(context.Background(), emptyQuery)
+
+	snapshot := resolverInstance.TakeWindow()
+	if snapshot.Total != 1 || snapshot.CacheHits != 0 || snapshot.CacheMisses != 1 {
+		testingInstance.Fatalf("empty question should count as total=1 miss=1, got %+v", snapshot)
+	}
+}
+
 func mustNoRecords(testingInstance *testing.T) *records.Store {
 	testingInstance.Helper()
 	store, err := records.New(nil)

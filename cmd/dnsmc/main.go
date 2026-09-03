@@ -389,6 +389,9 @@ func runServer(configPath, listenOverride, suffixOverride string) {
 		Sample:          sampleEntries,
 		Favicon:         loadedConfig.Server.Favicon,
 		LogQueries:      loadedConfig.Logging.Queries,
+		LogPerformance:  loadedConfig.Logging.Performance,
+		LogAnalytics:    loadedConfig.Logging.Analytics,
+		LogInterval:     loadedConfig.Logging.Interval,
 	}
 
 	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

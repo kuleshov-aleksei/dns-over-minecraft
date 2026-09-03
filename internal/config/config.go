@@ -47,7 +47,10 @@ type ClientConfig struct {
 }
 
 type LoggingConfig struct {
-	Queries bool `yaml:"queries"`
+	Queries     bool          `yaml:"queries"`
+	Performance bool          `yaml:"performance"`
+	Analytics   bool          `yaml:"analytics"`
+	Interval    time.Duration `yaml:"interval"`
 }
 
 type Upstream struct {
@@ -89,7 +92,10 @@ func Default() Config {
 			NegativeTTL: 30 * time.Second,
 		},
 		Logging: LoggingConfig{
-			Queries: false,
+			Queries:     false,
+			Performance: false,
+			Analytics:   false,
+			Interval:    30 * time.Second,
 		},
 		Client: ClientConfig{
 			Listen:  "127.0.0.1:53",
@@ -166,6 +172,9 @@ func Load(configPath string) (Config, error) {
 	}
 	if configuration.Client.Cache.Size == 0 {
 		configuration.Client.Cache.Size = 2048
+	}
+	if configuration.Logging.Interval == 0 {
+		configuration.Logging.Interval = 30 * time.Second
 	}
 	return configuration, nil
 }

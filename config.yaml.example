@@ -18,7 +18,10 @@ cache:
   negativeTtl: 30s
 # client service settings live in config.client.yaml.example
 logging:
-  queries: false # log every DNS query (name, type, result rcode) on the server
+  queries: false # log every DNS query (name, type, result rcode)
+  performance: false # report RPS + cache hit/miss rate every `interval`
+  analytics: false # report top 10 queried domains (all-time + last interval) every `interval`
+  interval: 30s
 upstreams:
   - name: "1.1.1.1-tcp"
     type: tcp

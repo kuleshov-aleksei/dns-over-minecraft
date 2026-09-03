@@ -43,7 +43,7 @@ logged). NXDOMAIN is not cached, neither on the client nor the server.
 ## Config
 
 See `config.yaml.example`. `priority` low = tried first (5 before 10 before 15). Fallback sequential.
-Server query logging (name, type, rcode, duration) is off by default; enable with `logging.queries: true`.
+Server logging is off by default; enable per-category with `logging.queries`, `logging.performance` (RPS + cache hit/miss rate), or `logging.analytics` (top 10 domains, all-time + last interval), reported every `logging.interval`.
 
 ## Protocol
 

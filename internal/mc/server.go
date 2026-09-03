@@ -3,8 +3,10 @@ package mc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/dnscodec"
@@ -24,7 +26,12 @@ type Server struct {
 	Sample          []map[string]string
 	Favicon         string
 	LogQueries      bool
+	LogPerformance  bool
+	LogAnalytics    bool
+	LogInterval     time.Duration
 }
+
+const defaultLogInterval = 30 * time.Second
 
 func (serverInstance *Server) ListenAndServe(requestContext context.Context) error {
 	listener, err := net.Listen("tcp", serverInstance.Addr)
@@ -38,6 +45,14 @@ func (serverInstance *Server) ListenAndServe(requestContext context.Context) err
 		<-requestContext.Done()
 		listener.Close()
 	}()
+
+	if serverInstance.LogPerformance || serverInstance.LogAnalytics {
+		reportInterval := serverInstance.LogInterval
+		if reportInterval <= 0 {
+			reportInterval = defaultLogInterval
+		}
+		go serverInstance.reportStats(requestContext, reportInterval)
+	}
 
 	for {
 		connection, err := listener.Accept()
@@ -151,4 +166,54 @@ func (serverInstance *Server) handlePing(connection net.Conn) {
 		}
 		_, _ = connection.Write(EncodePong(timestamp))
 	}
+}
+
+func (serverInstance *Server) reportStats(requestContext context.Context, reportInterval time.Duration) {
+	if serverInstance.Resolver == nil {
+		return
+	}
+	ticker := time.NewTicker(reportInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-requestContext.Done():
+			return
+		case <-ticker.C:
+			snapshot := serverInstance.Resolver.TakeWindow()
+			if snapshot.Total == 0 {
+				continue
+			}
+			if serverInstance.LogPerformance {
+				log.Printf("dnsmc server: %s", formatPerformance(snapshot.Total, snapshot.CacheHits, snapshot.CacheMisses, reportInterval))
+			}
+			if serverInstance.LogAnalytics {
+				allTime, lastWindow := serverInstance.Resolver.DomainStats(10)
+				log.Printf("dnsmc server: %s", formatTopDomains(allTime, lastWindow, reportInterval))
+			}
+		}
+	}
+}
+
+func formatPerformance(total int64, cacheHits, cacheMisses int64, window time.Duration) string {
+	requestsPerSecond := float64(total) / window.Seconds()
+	hitRate := 100.0 * float64(cacheHits) / float64(total)
+	missRate := 100.0 * float64(cacheMisses) / float64(total)
+	return fmt.Sprintf("performance: %d queries in %s (%.2f rps), cache hit %.1f%% miss %.1f%%",
+		total, window.Round(time.Second), requestsPerSecond, hitRate, missRate)
+}
+
+func formatTopDomains(allTime, lastWindow []resolver.DomainCount, window time.Duration) string {
+	return fmt.Sprintf("top domains: all-time [%s] | last %s [%s]",
+		formatDomainList(allTime), window.Round(time.Second), formatDomainList(lastWindow))
+}
+
+func formatDomainList(domainCounts []resolver.DomainCount) string {
+	if len(domainCounts) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(domainCounts))
+	for _, domainCount := range domainCounts {
+		parts = append(parts, fmt.Sprintf("%s (%d)", domainCount.Name, domainCount.Count))
+	}
+	return strings.Join(parts, ", ")
 }
