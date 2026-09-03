@@ -8,7 +8,7 @@ Recursive DNS server over Minecraft network protocol (Java Edition).
 
 Hides DNS queries inside real gaming protocol. Useful for censorship circumvention
 
-**Server** accepts vanilla-like pings on `:25565`, decodes `serverAddress = base32(dnsWire)+".mc"` to a `dns.Msg`, resolves via priority-ordered upstreams (TCP/DoT/DoH) + 5m LRU cache + custom records, returns `base64(dnsWire)` in `description.text`.
+**Server** accepts vanilla-like pings on `:25565`, decodes `serverAddress = base32(dnsWire)+".mc"` to a `dns.Msg`, resolves via priority-ordered upstreams (TCP/DoT/DoH) + 5m LRU cache + custom records, returns a compact owner-dropped response payload base64-encoded inside the status **favicon** (`data:image/png;base64,...`), with `description.text` showing the configured MOTD so the status looks like a normal Minecraft server.
 
 **Client** is same binary: `dnsmc -S` = server, `dnsmc <name> <type>` = query, `dnsmc -C` = local DNS service.
 
@@ -59,7 +59,7 @@ Server logging is off by default; enable per-category with `logging.queries`, `l
 
 ## Protocol
 
-Wire vanilla-identical: `Handshake(nextState=1) + StatusRequest`, suffix `.mc`, base32 query, base64 response in Status JSON.
+Wire vanilla-identical: `Handshake(nextState=1) + StatusRequest`, suffix `.mc`, base32 query, compact base64 response in the Status JSON favicon.
 
 The query wire is versioned: v1 (`0xFF` magic) has no EDNS; v2 (`0xFE` magic) adds a 1-byte
 EDNS buffer-size field so the client's advertised size travels end-to-end. `0xFF` queries still
@@ -71,6 +71,14 @@ clients that sent none.
 Queries whose encoded address would exceed 255 chars are **auto-fragmented**: the base32 query is
 split across multiple handshake/status connections (`n.<nonce>.<piece>.<suffix>`, index/total
 encoded in the handshake port), reassembled server-side, and answered on the final fragment.
+
+Responses always ride in the status **favicon** (`data:image/png;base64,<payload>`) while
+`description.text` shows the configured MOTD, so the status looks like a normal Minecraft server
+to packet analysis. The payload is a compact owner-dropped wire ("dropping the owner", cf.
+Cloudflare's 1.1.1.1 cache post): `0xD1` magic + uvarint rcode + flags + section counts; the
+question name is a literal and RR owners collapse to a qname / previous-owner / table-index token
+(an answer under the queried name costs one byte per record), with RDATA copied verbatim from an
+uncompressed pack. This removes any practical size ceiling on responses.
 
 ## System service
 

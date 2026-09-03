@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -27,6 +28,22 @@ const (
 	tldRaw       byte = 0x00
 	// 1..99 allocated, 100..254 reserved, 255 == magic
 	tldReservedStart byte = 100
+
+	// responseMagic leads every compact response payload so a decoder can
+	// distinguish it from any other base64 blob (e.g. a real PNG icon) found
+	// in the favicon field.
+	responseMagic byte = 0xD1
+	// FaviconDataURIPrefix wraps the payload in the status favicon field so
+	// the response looks like a normal Minecraft server icon.
+	FaviconDataURIPrefix = "data:image/png;base64,"
+
+	// Name tokens for the compact response wire: "dropping the owner" the way
+	// Cloudflare described in https://blog.cloudflare.com/dns-cache-memory-optimization-1111/.
+	// Most records share the queried owner, so that name collapses to a single byte.
+	nameTokenQname   byte = 0x00 // owner == question name
+	nameTokenPrev    byte = 0x01 // owner == previous RR owner
+	nameTokenTable   byte = 0x02 // followed by a uvarint index into the name table
+	nameTokenLiteral byte = 0x03 // followed by wire labels, appended to the table
 )
 
 // 99 TLDs -> codes 1..99
@@ -279,30 +296,403 @@ func StripSuffix(serverAddress, suffix string) string {
 	return serverAddress
 }
 
-// EncodeResponse encodes dns.Msg wire to base64 for JSON description.
+// EncodeResponse encodes a dns.Msg as a compact, owner-dropped payload and
+// returns it base64-encoded for the status favicon field.
 func EncodeResponse(responseMessage *dns.Msg) (string, error) {
-	wireBytes, err := responseMessage.Pack()
+	if responseMessage == nil {
+		return "", errors.New("nil response message")
+	}
+	compactWire, err := packCompactResponse(responseMessage)
 	if err != nil {
 		return "", err
 	}
-	return base64Encoding.EncodeToString(wireBytes), nil
+	return base64Encoding.EncodeToString(compactWire), nil
 }
 
-// DecodeResponse decodes base64 string from description to dns.Msg.
+// DecodeResponse decodes a base64 compact response payload (optionally wrapped
+// in the favicon data-URI prefix) back into a dns.Msg.
 func DecodeResponse(encodedResponse string) (*dns.Msg, error) {
 	encodedResponse = strings.TrimSpace(encodedResponse)
+	encodedResponse = strings.TrimPrefix(encodedResponse, FaviconDataURIPrefix)
 	if encodedResponse == "" {
 		return nil, errors.New("empty response")
 	}
-	wireBytes, err := base64Encoding.DecodeString(encodedResponse)
+	payload, err := base64Encoding.DecodeString(encodedResponse)
 	if err != nil {
 		return nil, err
 	}
+	return unpackCompactResponse(payload)
+}
+
+// packCompactResponse serializes a message with the owner-dropped layout:
+//
+//	magic(0xD1) uvarint(rcode) flags uvarint(qd) uvarint(an) uvarint(ns) uvarint(ar)
+//	per question: name-token uvarint(qtype) uvarint(qclass)
+//	per RR:       name-token uvarint(type) uvarint(class) uvarint(ttl) uvarint(rdlen) rdata
+//
+// RDATA is copied verbatim from an uncompressed pack, so embedded names are
+// fully expanded (no compression pointers dangling into a foreign message).
+func packCompactResponse(responseMessage *dns.Msg) ([]byte, error) {
+	qnameWire, err := packDomainNameWire(responseMessage.Question)
+	if err != nil {
+		return nil, err
+	}
+	nameTable := make([][]byte, 0, 8)
+	if len(qnameWire) > 0 {
+		nameTable = append(nameTable, qnameWire)
+	}
+	var previousOwnerWire []byte
+
+	encodeName := func(buffer *bytes.Buffer, nameWire []byte) error {
+		if len(qnameWire) > 0 && bytes.Equal(nameWire, qnameWire) {
+			buffer.WriteByte(nameTokenQname)
+			return nil
+		}
+		if len(previousOwnerWire) > 0 && bytes.Equal(nameWire, previousOwnerWire) {
+			buffer.WriteByte(nameTokenPrev)
+			return nil
+		}
+		for index, knownWire := range nameTable {
+			if bytes.Equal(knownWire, nameWire) {
+				buffer.WriteByte(nameTokenTable)
+				writeUvarint(buffer, uint64(index))
+				return nil
+			}
+		}
+		buffer.WriteByte(nameTokenLiteral)
+		buffer.Write(nameWire)
+		nameTable = append(nameTable, nameWire)
+		return nil
+	}
+
+	var buffer bytes.Buffer
+	buffer.WriteByte(responseMagic)
+	writeUvarint(&buffer, uint64(responseMessage.Rcode))
+	buffer.WriteByte(packFlags(responseMessage))
+	writeUvarint(&buffer, uint64(len(responseMessage.Question)))
+	writeUvarint(&buffer, uint64(len(responseMessage.Answer)))
+	writeUvarint(&buffer, uint64(len(responseMessage.Ns)))
+	writeUvarint(&buffer, uint64(len(responseMessage.Extra)))
+
+	for _, question := range responseMessage.Question {
+		// The question name is the qname itself; emit it as a literal because
+		// the decoder has nothing to reference it from yet.
+		questionNameWire, err := packDomainName(question.Name)
+		if err != nil {
+			return nil, err
+		}
+		buffer.WriteByte(nameTokenLiteral)
+		buffer.Write(questionNameWire)
+		writeUvarint(&buffer, uint64(question.Qtype))
+		writeUvarint(&buffer, uint64(question.Qclass))
+	}
+
+	rdataScratch := make([]byte, 256<<10)
+	encodeSection := func(section []dns.RR) error {
+		for _, resourceRecord := range section {
+			header := resourceRecord.Header()
+			ownerWire, err := packDomainName(header.Name)
+			if err != nil {
+				return err
+			}
+			if err := encodeName(&buffer, ownerWire); err != nil {
+				return err
+			}
+			writeUvarint(&buffer, uint64(header.Rrtype))
+			writeUvarint(&buffer, uint64(header.Class))
+			writeUvarint(&buffer, uint64(header.Ttl))
+			rdata, err := packRdata(resourceRecord, rdataScratch)
+			if err != nil {
+				return err
+			}
+			writeUvarint(&buffer, uint64(len(rdata)))
+			buffer.Write(rdata)
+			previousOwnerWire = ownerWire
+		}
+		return nil
+	}
+	for _, section := range [][]dns.RR{responseMessage.Answer, responseMessage.Ns, responseMessage.Extra} {
+		if err := encodeSection(section); err != nil {
+			return nil, err
+		}
+	}
+	return buffer.Bytes(), nil
+}
+
+// unpackCompactResponse parses the compact layout and rebuilds a standard DNS
+// wire message (fully expanded names) for dns.Msg.Unpack.
+func unpackCompactResponse(payload []byte) (*dns.Msg, error) {
+	reader := bytes.NewReader(payload)
+	firstByte, err := reader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+	if firstByte != responseMagic {
+		return nil, fmt.Errorf("not a dnsmc response payload (bad magic 0x%02X)", firstByte)
+	}
+	rcodeValue, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read rcode: %w", err)
+	}
+	flagsByte, err := reader.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("read flags: %w", err)
+	}
+	sectionCounts := make([]uint64, 4)
+	for index := range sectionCounts {
+		sectionCounts[index], err = binary.ReadUvarint(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read section count %d: %w", index, err)
+		}
+	}
+
+	var qnameWire []byte
+	var previousOwnerWire []byte
+	nameTable := make([][]byte, 0, 8)
+
+	readName := func() ([]byte, error) {
+		token, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		switch token {
+		case nameTokenQname:
+			if len(qnameWire) == 0 {
+				return nil, errors.New("qname token before any question")
+			}
+			return qnameWire, nil
+		case nameTokenPrev:
+			if len(previousOwnerWire) == 0 {
+				return nil, errors.New("previous-owner token before any RR")
+			}
+			return previousOwnerWire, nil
+		case nameTokenTable:
+			index, err := binary.ReadUvarint(reader)
+			if err != nil {
+				return nil, err
+			}
+			if index >= uint64(len(nameTable)) {
+				return nil, fmt.Errorf("name table index %d out of range", index)
+			}
+			return nameTable[index], nil
+		case nameTokenLiteral:
+			wire, err := readWireNameBytes(reader)
+			if err != nil {
+				return nil, err
+			}
+			nameTable = append(nameTable, wire)
+			return wire, nil
+		default:
+			return nil, fmt.Errorf("unknown name token 0x%02X", token)
+		}
+	}
+
+	var wireBuffer bytes.Buffer
+	wireBuffer.Write([]byte{0x00, 0x00}) // message ID
+	flagsWire := unpackFlags(flagsByte, rcodeValue)
+	wireBuffer.Write([]byte{byte(flagsWire >> 8), byte(flagsWire & 0xFF)})
+	for _, count := range sectionCounts {
+		wireBuffer.Write([]byte{byte(count >> 8), byte(count & 0xFF)})
+	}
+
+	for index := uint64(0); index < sectionCounts[0]; index++ {
+		nameWire, err := readName()
+		if err != nil {
+			return nil, fmt.Errorf("question %d name: %w", index, err)
+		}
+		if index == 0 {
+			qnameWire = nameWire
+		}
+		qtype, err := binary.ReadUvarint(reader)
+		if err != nil {
+			return nil, err
+		}
+		qclass, err := binary.ReadUvarint(reader)
+		if err != nil {
+			return nil, err
+		}
+		wireBuffer.Write(nameWire)
+		writeUint16(&wireBuffer, uint16(qtype))
+		writeUint16(&wireBuffer, uint16(qclass))
+	}
+
+	readSection := func(count uint64) error {
+		for index := uint64(0); index < count; index++ {
+			ownerWire, err := readName()
+			if err != nil {
+				return fmt.Errorf("RR %d name: %w", index, err)
+			}
+			previousOwnerWire = ownerWire
+			rrType, err := binary.ReadUvarint(reader)
+			if err != nil {
+				return err
+			}
+			class, err := binary.ReadUvarint(reader)
+			if err != nil {
+				return err
+			}
+			ttl, err := binary.ReadUvarint(reader)
+			if err != nil {
+				return err
+			}
+			rdLength, err := binary.ReadUvarint(reader)
+			if err != nil {
+				return err
+			}
+			if rdLength > uint64(reader.Len()) {
+				return fmt.Errorf("rdlength %d exceeds remaining payload %d", rdLength, reader.Len())
+			}
+			rdata := make([]byte, rdLength)
+			if _, err := io.ReadFull(reader, rdata); err != nil {
+				return err
+			}
+			wireBuffer.Write(ownerWire)
+			writeUint16(&wireBuffer, uint16(rrType))
+			writeUint16(&wireBuffer, uint16(class))
+			var ttlBytes [4]byte
+			binary.BigEndian.PutUint32(ttlBytes[:], uint32(ttl))
+			wireBuffer.Write(ttlBytes[:])
+			writeUint16(&wireBuffer, uint16(rdLength))
+			wireBuffer.Write(rdata)
+		}
+		return nil
+	}
+	for _, count := range sectionCounts[1:] {
+		if err := readSection(count); err != nil {
+			return nil, err
+		}
+	}
+
 	decodedMessage := new(dns.Msg)
-	if err := decodedMessage.Unpack(wireBytes); err != nil {
+	if err := decodedMessage.Unpack(wireBuffer.Bytes()); err != nil {
 		return nil, err
 	}
 	return decodedMessage, nil
+}
+
+// packDomainNameWire returns the uncompressed wire bytes of the first question
+// name, or nil when the message carries no question (there is no qname to drop
+// to then).
+func packDomainNameWire(questions []dns.Question) ([]byte, error) {
+	if len(questions) == 0 {
+		return nil, nil
+	}
+	return packDomainName(questions[0].Name)
+}
+
+func packDomainName(name string) ([]byte, error) {
+	scratch := make([]byte, 256)
+	packedLength, err := dns.PackDomainName(name, scratch, 0, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), scratch[:packedLength]...), nil
+}
+
+// packRdata extracts the RDATA bytes of a record with all embedded names fully
+// expanded, so it can be copied verbatim into the compact payload.
+func packRdata(resourceRecord dns.RR, scratch []byte) ([]byte, error) {
+	packedEnd, err := dns.PackRR(resourceRecord, scratch, 0, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	ownerLength, err := dns.PackDomainName(resourceRecord.Header().Name, scratch, 0, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return scratch[ownerLength+10 : packedEnd], nil
+}
+
+// readWireNameBytes reads a wire-format domain name (labels + terminator) and
+// returns the raw bytes, terminator included.
+func readWireNameBytes(reader *bytes.Reader) ([]byte, error) {
+	var wire []byte
+	for {
+		labelLength, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		wire = append(wire, labelLength)
+		if labelLength == 0 {
+			break
+		}
+		if labelLength > 63 {
+			return nil, fmt.Errorf("label too long %d", labelLength)
+		}
+		if int(labelLength) > reader.Len() {
+			return nil, fmt.Errorf("label length %d exceeds remaining payload %d", labelLength, reader.Len())
+		}
+		labelBytes := make([]byte, labelLength)
+		if _, err := io.ReadFull(reader, labelBytes); err != nil {
+			return nil, err
+		}
+		wire = append(wire, labelBytes...)
+	}
+	if len(wire) > 255 {
+		return nil, fmt.Errorf("name too long %d", len(wire))
+	}
+	return wire, nil
+}
+
+func writeUvarint(buffer *bytes.Buffer, value uint64) {
+	var varintBuffer [binary.MaxVarintLen64]byte
+	length := binary.PutUvarint(varintBuffer[:], value)
+	buffer.Write(varintBuffer[:length])
+}
+
+func writeUint16(buffer *bytes.Buffer, value uint16) {
+	var uint16Bytes [2]byte
+	binary.BigEndian.PutUint16(uint16Bytes[:], value)
+	buffer.Write(uint16Bytes[:])
+}
+
+// packFlags packs message flags into a single byte (AA RA RD TC AD CD).
+func packFlags(responseMessage *dns.Msg) byte {
+	var flags byte
+	if responseMessage.Authoritative {
+		flags |= 1 << 0
+	}
+	if responseMessage.RecursionAvailable {
+		flags |= 1 << 1
+	}
+	if responseMessage.RecursionDesired {
+		flags |= 1 << 2
+	}
+	if responseMessage.Truncated {
+		flags |= 1 << 3
+	}
+	if responseMessage.AuthenticatedData {
+		flags |= 1 << 4
+	}
+	if responseMessage.CheckingDisabled {
+		flags |= 1 << 5
+	}
+	return flags
+}
+
+// unpackFlags rebuilds the DNS wire-format header flags word (QR set) from the
+// compact flags byte and rcode.
+func unpackFlags(flagsByte byte, rcode uint64) uint16 {
+	var flagsWire uint16 = 0x8000 // QR
+	if flagsByte&(1<<0) != 0 {
+		flagsWire |= 0x0400 // AA
+	}
+	if flagsByte&(1<<1) != 0 {
+		flagsWire |= 0x0080 // RA
+	}
+	if flagsByte&(1<<2) != 0 {
+		flagsWire |= 0x0100 // RD
+	}
+	if flagsByte&(1<<3) != 0 {
+		flagsWire |= 0x0200 // TC
+	}
+	if flagsByte&(1<<4) != 0 {
+		flagsWire |= 0x0020 // AD
+	}
+	if flagsByte&(1<<5) != 0 {
+		flagsWire |= 0x0010 // CD
+	}
+	return flagsWire | uint16(rcode&0x0F)
 }
 
 // StripOPT removes the EDNS OPT pseudo-record from a message's extra section.
@@ -322,10 +712,38 @@ func StripOPT(responseMessage *dns.Msg) {
 	responseMessage.Extra = filteredExtra
 }
 
-// BuildStatusJSON builds the MC status JSON with base64 response in description.
-func BuildStatusJSON(base64Response string) []byte {
-	statusJSON := `{"version":{"name":"dnsmc","protocol":765},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"` + base64Response + `"}}`
-	return []byte(statusJSON)
+// BuildStatusJSON builds the MC status JSON for a dnsmc response. The motd is
+// presented as a normal server description while the compact response payload
+// rides in the favicon field, so the status looks like a normal Minecraft
+// server to packet analysis.
+func BuildStatusJSON(motd string, payloadBase64 string) []byte {
+	type sampleEntry struct {
+		Name string `json:"name"`
+		ID   string `json:"id"`
+	}
+	type status struct {
+		Version struct {
+			Name     string `json:"name"`
+			Protocol int    `json:"protocol"`
+		} `json:"version"`
+		Players struct {
+			Max    int           `json:"max"`
+			Online int           `json:"online"`
+			Sample []sampleEntry `json:"sample"`
+		} `json:"players"`
+		Description struct {
+			Text string `json:"text"`
+		} `json:"description"`
+		Favicon string `json:"favicon"`
+	}
+	var statusResponse status
+	statusResponse.Version.Name = "dnsmc"
+	statusResponse.Version.Protocol = 765
+	statusResponse.Players.Sample = []sampleEntry{}
+	statusResponse.Description.Text = motd
+	statusResponse.Favicon = FaviconDataURIPrefix + payloadBase64
+	jsonBytes, _ := json.Marshal(statusResponse)
+	return jsonBytes
 }
 
 // BuildVanillaStatusJSON builds a vanilla-friendly status response for real MC clients.

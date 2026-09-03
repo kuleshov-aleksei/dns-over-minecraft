@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -434,12 +435,22 @@ func TestEncodeDecodeResponse_Roundtrip(testingInstance *testing.T) {
 	if decodedResponse.Answer[0].String() != resourceRecord.String() {
 		testingInstance.Fatalf("rr mismatch %q vs %q", decodedResponse.Answer[0].String(), resourceRecord.String())
 	}
+	if !decodedResponse.Authoritative {
+		testingInstance.Fatal("AA flag not preserved")
+	}
 	decodedWithWhitespace, err := DecodeResponse("  " + encodedResponse + "\n")
 	if err != nil {
 		testingInstance.Fatalf("DecodeResponse whitespace: %v", err)
 	}
 	if len(decodedWithWhitespace.Answer) != 1 {
 		testingInstance.Fatalf("whitespace decode answer len")
+	}
+	decodedFromFavicon, err := DecodeResponse(FaviconDataURIPrefix + encodedResponse)
+	if err != nil {
+		testingInstance.Fatalf("DecodeResponse favicon prefix: %v", err)
+	}
+	if len(decodedFromFavicon.Answer) != 1 {
+		testingInstance.Fatalf("favicon prefix decode answer len")
 	}
 
 	nameErrorResponse := new(dns.Msg)
@@ -462,9 +473,14 @@ func TestDecodeResponse_Errors(testingInstance *testing.T) {
 	if _, err := DecodeResponse("!!! not base64 !!!"); err == nil {
 		testingInstance.Fatalf("want base64 error")
 	}
-	badWireBytes := base64.StdEncoding.EncodeToString([]byte("short"))
-	if _, err := DecodeResponse(badWireBytes); err == nil {
-		testingInstance.Fatalf("want unpack error for bad wire")
+	badMagicBytes := base64.StdEncoding.EncodeToString([]byte("short"))
+	if _, err := DecodeResponse(badMagicBytes); err == nil || !strings.Contains(err.Error(), "bad magic") {
+		testingInstance.Fatalf("want bad magic error, got %v", err)
+	}
+	// A real PNG icon must be rejected, not decoded.
+	pngDataURI := FaviconDataURIPrefix + base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4E, 0x47})
+	if _, err := DecodeResponse(pngDataURI); err == nil || !strings.Contains(err.Error(), "bad magic") {
+		testingInstance.Fatalf("want bad magic error for png, got %v", err)
 	}
 }
 
@@ -473,29 +489,25 @@ func TestBuildStatusJSON(testingInstance *testing.T) {
 	responseMessage := new(dns.Msg)
 	responseMessage.SetReply(queryMessage)
 	encodedResponse, _ := EncodeResponse(responseMessage)
-	rawJSON := BuildStatusJSON(encodedResponse)
+	rawJSON := BuildStatusJSON("§aDNS over Minecraft", encodedResponse)
 	if !json.Valid(rawJSON) {
 		testingInstance.Fatalf("invalid json: %s", rawJSON)
-	}
-	var rawMessageMap map[string]json.RawMessage
-	if err := json.Unmarshal(rawJSON, &rawMessageMap); err != nil {
-		testingInstance.Fatalf("unmarshal: %v", err)
-	}
-	var descriptionStruct struct {
-		Text string `json:"text"`
 	}
 	var topLevel struct {
 		Description struct {
 			Text string `json:"text"`
 		} `json:"description"`
+		Favicon string `json:"favicon"`
 	}
 	if err := json.Unmarshal(rawJSON, &topLevel); err != nil {
 		testingInstance.Fatalf("unmarshal top: %v", err)
 	}
-	if topLevel.Description.Text != encodedResponse {
-		testingInstance.Fatalf("description.text %q != %q", topLevel.Description.Text, encodedResponse)
+	if topLevel.Description.Text != "§aDNS over Minecraft" {
+		testingInstance.Fatalf("description.text %q != motd", topLevel.Description.Text)
 	}
-	_ = descriptionStruct
+	if topLevel.Favicon != FaviconDataURIPrefix+encodedResponse {
+		testingInstance.Fatalf("favicon %q != data-uri payload", topLevel.Favicon)
+	}
 }
 
 func TestBuildVanillaStatusJSON(testingInstance *testing.T) {
@@ -545,5 +557,161 @@ func TestBuildErrorResponse(testingInstance *testing.T) {
 	}
 	if len(responseForNilQuery.Question) != 0 {
 		testingInstance.Fatalf("nil query should have no question")
+	}
+}
+
+func responseFromText(testingInstance *testing.T, lines ...string) *dns.Msg {
+	testingInstance.Helper()
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(makeMessage(testingInstance, "example.com", dns.TypeA))
+	for _, line := range lines {
+		resourceRecord, err := dns.NewRR(line)
+		if err != nil {
+			testingInstance.Fatalf("NewRR %q: %v", line, err)
+		}
+		responseMessage.Answer = append(responseMessage.Answer, resourceRecord)
+	}
+	return responseMessage
+}
+
+func assertRoundtrip(testingInstance *testing.T, responseMessage *dns.Msg) {
+	testingInstance.Helper()
+	encodedResponse, err := EncodeResponse(responseMessage)
+	if err != nil {
+		testingInstance.Fatalf("EncodeResponse: %v", err)
+	}
+	decodedResponse, err := DecodeResponse(encodedResponse)
+	if err != nil {
+		testingInstance.Fatalf("DecodeResponse: %v", err)
+	}
+	if decodedResponse.Rcode != responseMessage.Rcode {
+		testingInstance.Fatalf("rcode %d != %d", decodedResponse.Rcode, responseMessage.Rcode)
+	}
+	for _, sectionName := range []string{"Answer", "Ns", "Extra"} {
+		originalSection := []dns.RR(responseMessage.Answer)
+		decodedSection := []dns.RR(decodedResponse.Answer)
+		switch sectionName {
+		case "Answer":
+		case "Ns":
+			originalSection = responseMessage.Ns
+			decodedSection = decodedResponse.Ns
+		case "Extra":
+			originalSection = responseMessage.Extra
+			decodedSection = decodedResponse.Extra
+		}
+		if len(originalSection) != len(decodedSection) {
+			testingInstance.Fatalf("%s len %d != %d", sectionName, len(originalSection), len(decodedSection))
+		}
+		for recordIndex := range originalSection {
+			if decodedSection[recordIndex].String() != originalSection[recordIndex].String() {
+				testingInstance.Fatalf("%s[%d] mismatch\n got %q\nwant %q",
+					sectionName, recordIndex, decodedSection[recordIndex].String(), originalSection[recordIndex].String())
+			}
+		}
+	}
+}
+
+func TestCompactResponse_ManyRecordsSavings(testingInstance *testing.T) {
+	recordLines := make([]string, 0, 20)
+	for index := 0; index < 20; index++ {
+		recordLines = append(recordLines, "example.com. 300 IN A 10.0.0."+strconv.Itoa(index+1))
+	}
+	responseMessage := responseFromText(testingInstance, recordLines...)
+
+	standardWire, err := responseMessage.Pack()
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	compactWire, err := packCompactResponse(responseMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if len(compactWire) >= len(standardWire) {
+		testingInstance.Fatalf("compact %d bytes not smaller than standard %d", len(compactWire), len(standardWire))
+	}
+	assertRoundtrip(testingInstance, responseMessage)
+}
+
+func TestCompactResponse_CNAMEChain(testingInstance *testing.T) {
+	responseMessage := responseFromText(testingInstance,
+		"example.com. 300 IN CNAME cdn.example.net.",
+		"cdn.example.net. 300 IN A 198.51.100.1",
+		"cdn.example.net. 300 IN A 198.51.100.2",
+	)
+	assertRoundtrip(testingInstance, responseMessage)
+}
+
+func TestCompactResponse_TXT(testingInstance *testing.T) {
+	responseMessage := responseFromText(testingInstance,
+		`example.com. 60 IN TXT "v=spf1 include:_spf.example.com ~all"`,
+		`example.com. 60 IN TXT "dkim=test"`,
+	)
+	assertRoundtrip(testingInstance, responseMessage)
+}
+
+func TestCompactResponse_SOA_NXDOMAIN(testingInstance *testing.T) {
+	queryMessage := makeMessage(testingInstance, "missing.example.com", dns.TypeA)
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(queryMessage)
+	responseMessage.Rcode = dns.RcodeNameError
+	soaRecord, err := dns.NewRR("example.com. 1800 IN SOA ns1.example.com. hostmaster.example.com. 2026090401 10000 2400 604800 1800")
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	responseMessage.Ns = []dns.RR{soaRecord}
+	assertRoundtrip(testingInstance, responseMessage)
+}
+
+func TestCompactResponse_MX(testingInstance *testing.T) {
+	responseMessage := responseFromText(testingInstance,
+		"example.com. 300 IN MX 10 mail.example.com.",
+	)
+	assertRoundtrip(testingInstance, responseMessage)
+}
+
+func TestCompactResponse_OPTExtra(testingInstance *testing.T) {
+	queryMessage := makeMessage(testingInstance, "example.com", dns.TypeA)
+	queryMessage.SetEdns0(4096, false)
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(queryMessage)
+	aRecord, err := dns.NewRR("example.com. 300 IN A 1.2.3.4")
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	responseMessage.Answer = []dns.RR{aRecord}
+	responseMessage.SetEdns0(4096, false)
+
+	encodedResponse, err := EncodeResponse(responseMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	decodedResponse, err := DecodeResponse(encodedResponse)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	optRecord := decodedResponse.IsEdns0()
+	if optRecord == nil {
+		testingInstance.Fatal("OPT record lost in roundtrip")
+	}
+	if optRecord.UDPSize() != 4096 {
+		testingInstance.Fatalf("udp size %d", optRecord.UDPSize())
+	}
+	if len(decodedResponse.Answer) != 1 || decodedResponse.Answer[0].String() != aRecord.String() {
+		testingInstance.Fatalf("answer mismatch: %v", decodedResponse.Answer)
+	}
+}
+
+func TestCompactResponse_NoQuestionErrorResponse(testingInstance *testing.T) {
+	errorResponse := BuildErrorResponse(nil, dns.RcodeFormatError)
+	encodedResponse, err := EncodeResponse(errorResponse)
+	if err != nil {
+		testingInstance.Fatalf("EncodeResponse no-question: %v", err)
+	}
+	decodedResponse, err := DecodeResponse(encodedResponse)
+	if err != nil {
+		testingInstance.Fatalf("DecodeResponse: %v", err)
+	}
+	if decodedResponse.Rcode != dns.RcodeFormatError {
+		testingInstance.Fatalf("rcode %d", decodedResponse.Rcode)
 	}
 }

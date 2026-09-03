@@ -39,7 +39,7 @@ func main() {
   dnsmc -C [-listen 127.0.0.1:53] [-config config.yaml]       # local DNS client service
   dnsmc [options] <name> [type]                               # client query
   dnsmc encode <name> [type] [-suffix .mc]                    # print base32 for /etc/hosts + vanilla
-  dnsmc decode <base64>                                       # decode description.text from vanilla ping
+  dnsmc decode <base64>                                       # decode response favicon from status
   dnsmc hosts <name> [type] [-ip 127.0.0.1] [-suffix .mc]      # print /etc/hosts line
 `)
 		flag.PrintDefaults()
@@ -49,8 +49,8 @@ Examples:
   dnsmc -server 1.2.3.4:25565 example.com.mc A
   dnsmc -S -config config.yaml
   dnsmc encode example.com A          # -> m5xw...mc
-  # add that .mc name as Server Address in Minecraft, refresh Server List, copy description.text
-  dnsmc decode <base64-from-MOTD>
+  # add that .mc name as Server Address in Minecraft, refresh Server List, copy favicon base64
+  dnsmc decode <base64-from-favicon>
 `)
 	}
 	flag.Parse()
@@ -243,7 +243,9 @@ func runDecode(arguments []string) {
 	if strings.Contains(rawInput, "{") {
 		var jsonMap map[string]interface{}
 		if err := json.Unmarshal([]byte(rawInput), &jsonMap); err == nil {
-			if descriptionMap, exists := jsonMap["description"].(map[string]interface{}); exists {
+			if faviconValue, exists := jsonMap["favicon"].(string); exists && faviconValue != "" {
+				rawInput = faviconValue
+			} else if descriptionMap, exists := jsonMap["description"].(map[string]interface{}); exists {
 				if textValue, exists := descriptionMap["text"].(string); exists && textValue != "" {
 					rawInput = textValue
 				}
@@ -253,7 +255,7 @@ func runDecode(arguments []string) {
 	isBase32Input := isBase32Like(rawInput)
 	if isBase32Input {
 		if decodedQuery, err := dnscodec.DecodeQuery(rawInput, ""); err == nil {
-			fmt.Printf(";; decoded as QUERY (base32) not response - you pasted the ServerAddress, not description.text:\n")
+			fmt.Printf(";; decoded as QUERY (base32) not response - you pasted the ServerAddress, not the response favicon:\n")
 			fmt.Printf(";; question: %s\n", decodedQuery.Question[0].String())
 			fmt.Printf("%s\n", decodedQuery.String())
 			return
@@ -266,7 +268,7 @@ func runDecode(arguments []string) {
 	decodedResponse, err := dnscodec.DecodeResponse(rawInput)
 	if err != nil {
 		if queryErr, _ := dnscodec.DecodeQuery(rawInput, ""); queryErr != nil {
-			log.Fatalf("decode: response base64 error: %v (input len %d); also not valid query: %v\nHint: for vanilla simulation, 'encode' gives ServerAddress to put in /etc/hosts; 'decode' expects base64 from Server List description.text, not the hostname.", err, len(rawInput), queryErr)
+			log.Fatalf("decode: response base64 error: %v (input len %d); also not valid query: %v\nHint: for vanilla simulation, 'encode' gives ServerAddress to put in /etc/hosts; 'decode' expects base64 from Server List response favicon, not the hostname.", err, len(rawInput), queryErr)
 		}
 		log.Fatalf("decode: %v (input len %d)", err, len(rawInput))
 	}

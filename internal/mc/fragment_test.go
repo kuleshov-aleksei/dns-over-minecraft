@@ -1,6 +1,8 @@
 package mc
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -159,6 +161,7 @@ func startTestServer(testedInstance *testing.T) (string, *Server) {
 	}
 	serverInstance := &Server{
 		Suffix:    ".mc",
+		MOTD:      "§aDNS over Minecraft §7| test",
 		Resolver:  resolver.New(nil, recordStore, nil),
 		fragments: newFragmentAssembler(),
 	}
@@ -226,5 +229,108 @@ func TestQuery_SingleStillWorks(testedInstance *testing.T) {
 	answer, ok := response.Answer[0].(*dns.A)
 	if !ok || answer.A.String() != "10.0.0.9" {
 		testedInstance.Fatalf("unexpected answer: %v", response.Answer)
+	}
+}
+
+func TestDecodeStatusResponse_ReadsFavicon(testedInstance *testing.T) {
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(queryMessage)
+	aRecord, err := dns.NewRR("example.com. 300 IN A 1.2.3.4")
+	if err != nil {
+		testedInstance.Fatal(err)
+	}
+	responseMessage.Answer = []dns.RR{aRecord}
+
+	payload, err := dnscodec.EncodeResponse(responseMessage)
+	if err != nil {
+		testedInstance.Fatalf("EncodeResponse: %v", err)
+	}
+
+	var statusResponse StatusResponse
+	if err := json.Unmarshal(dnscodec.BuildStatusJSON("motd here", payload), &statusResponse); err != nil {
+		testedInstance.Fatalf("unmarshal: %v", err)
+	}
+	if statusResponse.Description.Text != "motd here" {
+		testedInstance.Fatalf("description %q, want motd", statusResponse.Description.Text)
+	}
+
+	decoded, err := decodeStatusResponse(statusResponse, queryMessage)
+	if err != nil {
+		testedInstance.Fatalf("decode: %v", err)
+	}
+	if decoded.Id != queryMessage.Id {
+		testedInstance.Fatalf("id %d != %d", decoded.Id, queryMessage.Id)
+	}
+	if len(decoded.Answer) != 1 || decoded.Answer[0].String() != aRecord.String() {
+		testedInstance.Fatalf("answer mismatch: %v", decoded.Answer)
+	}
+}
+
+func TestDecodeStatusResponse_RejectsRealIcon(testedInstance *testing.T) {
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+	statusResponse := StatusResponse{
+		Favicon: dnscodec.FaviconDataURIPrefix + base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4E, 0x47}),
+	}
+	if _, err := decodeStatusResponse(statusResponse, queryMessage); err == nil {
+		testedInstance.Fatal("expected error decoding a real PNG favicon")
+	}
+}
+
+func TestQuery_LargeTXTThroughFavicon(testedInstance *testing.T) {
+	const chunkCount = 160
+	chunkParts := make([]string, 0, chunkCount)
+	for index := 0; index < chunkCount; index++ {
+		chunkParts = append(chunkParts, `"`+strings.Repeat("x", 200)+`"`)
+	}
+	recordStore, err := records.New([]records.Record{
+		{Name: "big.example.com", Type: "TXT", TTL: 60, Values: []string{strings.Join(chunkParts, " ")}},
+	})
+	if err != nil {
+		testedInstance.Fatalf("records.New: %v", err)
+	}
+	serverInstance := &Server{
+		Suffix:    ".mc",
+		MOTD:      "big motd",
+		Resolver:  resolver.New(nil, recordStore, nil),
+		fragments: newFragmentAssembler(),
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		testedInstance.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go serverInstance.handleConn(connection)
+		}
+	}()
+	testedInstance.Cleanup(func() { _ = listener.Close() })
+
+	queryMessage := new(dns.Msg)
+	queryMessage.SetQuestion(dns.Fqdn("big.example.com"), dns.TypeTXT)
+	response, err := Query(listener.Addr().String(), ".mc", queryMessage)
+	if err != nil {
+		testedInstance.Fatalf("large TXT query: %v", err)
+	}
+	if len(response.Answer) != 1 {
+		testedInstance.Fatalf("want 1 answer, got %d", len(response.Answer))
+	}
+	txtRecord, ok := response.Answer[0].(*dns.TXT)
+	if !ok {
+		testedInstance.Fatalf("answer not TXT: %T", response.Answer[0])
+	}
+	if len(txtRecord.Txt) != chunkCount {
+		testedInstance.Fatalf("txt chunks %d, want %d", len(txtRecord.Txt), chunkCount)
+	}
+	for _, chunk := range txtRecord.Txt {
+		if len(chunk) != 200 {
+			testedInstance.Fatalf("chunk len %d, want 200", len(chunk))
+		}
 	}
 }

@@ -182,7 +182,7 @@ func exchange(serverAddress string, address string, serverPort int, queryMessage
 }
 
 func decodeStatusResponse(statusResponse StatusResponse, queryMessage *dns.Msg) (*dns.Msg, error) {
-	responseMessage, err := dnscodec.DecodeResponse(statusResponse.Description.Text)
+	responseMessage, err := dnscodec.DecodeResponse(statusResponse.Favicon)
 	if err != nil {
 		return nil, fmt.Errorf("decode dns response: %w", err)
 	}

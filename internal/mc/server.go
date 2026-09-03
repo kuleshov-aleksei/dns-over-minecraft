@@ -2,6 +2,7 @@ package mc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -111,9 +112,7 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 			bareLength := len(dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix))
 			log.Printf("decode failed for DNS query %q (bare %d chars): %v -- hint: generate with 'dnsmc encode <name> [type]' (want base32(packed dns.Msg)+suffix)", handshake.ServerAddress, bareLength, err)
 			errorResponse := dnscodec.BuildErrorResponse(nil, 1)
-			base64Response, _ := dnscodec.EncodeResponse(errorResponse)
-			rawJSON := dnscodec.BuildStatusJSON(base64Response)
-			_, _ = connection.Write(EncodeStatusResponseJSON(rawJSON))
+			serverInstance.sendDNSResponse(connection, errorResponse)
 			serverInstance.handlePing(connection)
 			return
 		}
@@ -140,12 +139,30 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 			connection.RemoteAddr(), question.Name, dns.TypeToString[question.Qtype],
 			dns.RcodeToString[responseMessage.Rcode], time.Since(queryStartTime).Round(time.Microsecond))
 	}
-	base64Response, err := dnscodec.EncodeResponse(responseMessage)
-	if err != nil {
-		base64Response, _ = dnscodec.EncodeResponse(dnscodec.BuildErrorResponse(queryMessage, 2))
-	}
-	serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(base64Response))
+	serverInstance.sendDNSResponse(connection, responseMessage)
 	serverInstance.handlePing(connection)
+}
+
+// defaultMOTD is shown in the status description when the server has none
+// configured; it also keeps dnsmc clients from rejecting the response for an
+// empty description.
+const defaultMOTD = "dnsmc server"
+
+func (serverInstance *Server) effectiveMOTD() string {
+	if serverInstance.MOTD != "" {
+		return serverInstance.MOTD
+	}
+	return defaultMOTD
+}
+
+// sendDNSResponse encodes a DNS response into the compact favicon payload and
+// writes the status JSON (description carrying the motd).
+func (serverInstance *Server) sendDNSResponse(connection net.Conn, responseMessage *dns.Msg) {
+	payloadBase64, err := dnscodec.EncodeResponse(responseMessage)
+	if err != nil {
+		payloadBase64, _ = dnscodec.EncodeResponse(dnscodec.BuildErrorResponse(responseMessage, 2))
+	}
+	serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(serverInstance.effectiveMOTD(), payloadBase64))
 }
 
 const fragmentAckMarker = "fragment-ack"
@@ -207,13 +224,13 @@ func (serverInstance *Server) handleFragmentConnection(connection net.Conn, hand
 			responseMessage = dnscodec.BuildErrorResponse(nil, 2)
 		}
 	default:
-		serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(fragmentAckMarker))
+		serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(
+			serverInstance.effectiveMOTD(), base64.StdEncoding.EncodeToString([]byte(fragmentAckMarker))))
 		serverInstance.handlePing(connection)
 		return
 	}
 
-	base64Response, _ := dnscodec.EncodeResponse(responseMessage)
-	serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(base64Response))
+	serverInstance.sendDNSResponse(connection, responseMessage)
 	serverInstance.handlePing(connection)
 }
 
