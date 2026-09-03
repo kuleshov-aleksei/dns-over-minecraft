@@ -15,14 +15,14 @@ import (
 )
 
 type fakeUpstream struct {
-	name string
+	name     string
 	priority int
 	response *dns.Msg
-	err  error
-	hits int
+	err      error
+	hits     int
 }
 
-func (fakeUpstreamInstance *fakeUpstream) Name() string { return fakeUpstreamInstance.name }
+func (fakeUpstreamInstance *fakeUpstream) Name() string  { return fakeUpstreamInstance.name }
 func (fakeUpstreamInstance *fakeUpstream) Priority() int { return fakeUpstreamInstance.priority }
 func (fakeUpstreamInstance *fakeUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
 	fakeUpstreamInstance.hits++
@@ -316,6 +316,163 @@ func TestResolver_StatsAllTimePruned(testingInstance *testing.T) {
 	if len(allTime) != keepTopDomains {
 		testingInstance.Fatalf("DomainStats should report %d entries, got %d", keepTopDomains, len(allTime))
 	}
+}
+
+func TestResolver_DefaultEDNSOnUpstreamQuery(testingInstance *testing.T) {
+	recordStore := mustNoRecords(testingInstance)
+	upstreamSeen := make(chan *dns.Msg, 1)
+	recordingUpstream := &recordingUpstream{seen: upstreamSeen, response: makeResponse(makeQuery(testingInstance, "example.com", dns.TypeA, 1), nil, dns.RcodeSuccess)}
+	upstreamPool := upstream.NewPool([]upstream.Upstream{recordingUpstream})
+	resolverInstance := New(nil, recordStore, upstreamPool)
+
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 7)
+	_, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	upstreamQuery := <-upstreamSeen
+	if upstreamQuery.IsEdns0() == nil {
+		testingInstance.Fatalf("upstream should receive default EDNS when client sent none")
+	}
+	if optRecord := upstreamQuery.IsEdns0(); optRecord.UDPSize() != 4096 {
+		testingInstance.Fatalf("default EDNS size %d, want 4096", optRecord.UDPSize())
+	}
+	if optRecord := upstreamQuery.IsEdns0(); optRecord.Do() {
+		testingInstance.Fatalf("DO must not be set (DNSSEC dropped)")
+	}
+}
+
+func TestResolver_ClientEDNSNotOverridden(testingInstance *testing.T) {
+	recordStore := mustNoRecords(testingInstance)
+	upstreamSeen := make(chan *dns.Msg, 1)
+	recordingUpstream := &recordingUpstream{seen: upstreamSeen, response: makeResponse(makeQuery(testingInstance, "example.com", dns.TypeA, 1), nil, dns.RcodeSuccess)}
+	upstreamPool := upstream.NewPool([]upstream.Upstream{recordingUpstream})
+	resolverInstance := New(nil, recordStore, upstreamPool)
+
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 7)
+	queryMessage.SetEdns0(512, true)
+	_, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	upstreamQuery := <-upstreamSeen
+	if optRecord := upstreamQuery.IsEdns0(); optRecord == nil || optRecord.UDPSize() != 512 {
+		testingInstance.Fatalf("client EDNS size should be honored, got %+v", optRecord)
+	}
+	if optRecord := upstreamQuery.IsEdns0(); optRecord.Do() {
+		testingInstance.Fatalf("DO must not be propagated, got %+v", optRecord)
+	}
+}
+
+func TestResolver_StripsOPWhenClientHadNoEDNS(testingInstance *testing.T) {
+	recordStore := mustNoRecords(testingInstance)
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 7)
+	upstreamResponse := makeResponse(queryMessage, nil, dns.RcodeSuccess)
+	upstreamResponse.SetEdns0(4096, false)
+	fakeUpstreamInstance := &fakeUpstream{name: "fake", priority: 1, response: upstreamResponse}
+	resolverInstance := New(nil, recordStore, upstream.NewPool([]upstream.Upstream{fakeUpstreamInstance}))
+
+	responseMessage, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if responseMessage.IsEdns0() != nil {
+		testingInstance.Fatalf("OPT should be stripped for a no-EDNS client")
+	}
+}
+
+func TestResolver_KeepsOPTWhenClientHadEDNS(testingInstance *testing.T) {
+	recordStore := mustNoRecords(testingInstance)
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 7)
+	queryMessage.SetEdns0(4096, false)
+	upstreamResponse := makeResponse(queryMessage, nil, dns.RcodeSuccess)
+	upstreamResponse.SetEdns0(4096, false)
+	fakeUpstreamInstance := &fakeUpstream{name: "fake", priority: 1, response: upstreamResponse}
+	resolverInstance := New(nil, recordStore, upstream.NewPool([]upstream.Upstream{fakeUpstreamInstance}))
+
+	responseMessage, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if responseMessage.IsEdns0() == nil {
+		testingInstance.Fatalf("OPT should be preserved for an EDNS client")
+	}
+}
+
+func TestResolver_TruncatedRetry(testedInstance *testing.T) {
+	recordStore := mustNoRecords(testedInstance)
+	queryMessage := makeQuery(testedInstance, "big.example.com", dns.TypeTXT, 7)
+	fullResponse := makeResponse(queryMessage, nil, dns.RcodeSuccess)
+	fullResponse.SetEdns0(4096, false)
+	truncatedResponse := fullResponse.Copy()
+	truncatedResponse.Truncated = true
+	retryUpstream := &retryUpstream{responses: []*dns.Msg{truncatedResponse, fullResponse}}
+	resolverInstance := New(nil, recordStore, upstream.NewPool([]upstream.Upstream{retryUpstream}))
+
+	responseMessage, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testedInstance.Fatal(err)
+	}
+	if responseMessage.Truncated {
+		testedInstance.Fatalf("expected full response after retry")
+	}
+	if retryUpstream.calls != 2 {
+		testedInstance.Fatalf("expected 2 upstream exchanges, got %d", retryUpstream.calls)
+	}
+	if len(retryUpstream.queries) != 2 || retryUpstream.queries[1].IsEdns0() == nil || retryUpstream.queries[1].IsEdns0().UDPSize() != 65535 {
+		testedInstance.Fatalf("retry should use EDNS 65535, got %+v", retryUpstream.queries)
+	}
+}
+
+func TestResolver_TruncatedNotCached(testingInstance *testing.T) {
+	cacheStore := cache.New(10, 5*time.Minute, 30*time.Second)
+	recordStore := mustNoRecords(testingInstance)
+	queryMessage := makeQuery(testingInstance, "big.example.com", dns.TypeTXT, 7)
+	truncatedResponse := makeResponse(queryMessage, nil, dns.RcodeSuccess)
+	truncatedResponse.Truncated = true
+	retryUpstream := &retryUpstream{responses: []*dns.Msg{truncatedResponse, truncatedResponse}}
+	resolverInstance := New(cacheStore, recordStore, upstream.NewPool([]upstream.Upstream{retryUpstream}))
+
+	_, err := resolverInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testedInstance := testingInstance
+		testedInstance.Fatal(err)
+	}
+	if _, exists := cacheStore.Get(queryMessage.Question[0]); exists {
+		testingInstance.Fatalf("truncated response must not be cached")
+	}
+}
+
+type recordingUpstream struct {
+	seen     chan *dns.Msg
+	response *dns.Msg
+}
+
+func (recordingUpstreamInstance *recordingUpstream) Name() string  { return "recording" }
+func (recordingUpstreamInstance *recordingUpstream) Priority() int { return 1 }
+func (recordingUpstreamInstance *recordingUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	recordingUpstreamInstance.seen <- queryMessage.Copy()
+	if recordingUpstreamInstance.response != nil {
+		return recordingUpstreamInstance.response.Copy(), nil
+	}
+	return nil, nil
+}
+
+type retryUpstream struct {
+	responses []*dns.Msg
+	calls     int
+	queries   []*dns.Msg
+}
+
+func (retryUpstreamInstance *retryUpstream) Name() string  { return "retry" }
+func (retryUpstreamInstance *retryUpstream) Priority() int { return 1 }
+func (retryUpstreamInstance *retryUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
+	retryUpstreamInstance.calls++
+	retryUpstreamInstance.queries = append(retryUpstreamInstance.queries, queryMessage.Copy())
+	if retryUpstreamInstance.calls > len(retryUpstreamInstance.responses) {
+		return nil, nil
+	}
+	return retryUpstreamInstance.responses[retryUpstreamInstance.calls-1].Copy(), nil
 }
 
 func mustNoRecords(testingInstance *testing.T) *records.Store {

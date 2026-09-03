@@ -239,6 +239,45 @@ func TestClient_FailoverToHealthyServer(testingInstance *testing.T) {
 	}
 }
 
+func TestClient_StripsOPTWhenQueryHadNoEDNS(testingInstance *testing.T) {
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 1)
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(queryMessage)
+	responseMessage.SetEdns0(4096, false)
+	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
+		"example.com./A": responseMessage,
+	}}
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, fakeQuery.Query)
+
+	responseResult, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if responseResult.IsEdns0() != nil {
+		testingInstance.Fatalf("OPT should be stripped when the query had no EDNS")
+	}
+}
+
+func TestClient_KeepsOPTWhenQueryHadEDNS(testingInstance *testing.T) {
+	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 1)
+	queryMessage.SetEdns0(4096, false)
+	responseMessage := new(dns.Msg)
+	responseMessage.SetReply(queryMessage)
+	responseMessage.SetEdns0(4096, false)
+	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
+		"example.com./A": responseMessage,
+	}}
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, fakeQuery.Query)
+
+	responseResult, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if responseResult.IsEdns0() == nil {
+		testingInstance.Fatalf("OPT should be preserved when the query had EDNS")
+	}
+}
+
 func TestClient_AllServersFail(testingInstance *testing.T) {
 	var seenServers []string
 	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/cache"
+	"github.com/dns-over-minecraft/dns-over-minecraft/internal/dnscodec"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/records"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/upstream"
 	"github.com/miekg/dns"
@@ -74,14 +75,33 @@ func (resolverInstance *Resolver) Resolve(requestContext context.Context, queryM
 		errorResponse.Rcode = dns.RcodeServerFailure
 		return errorResponse, nil
 	}
-	upstreamResponse, err := resolverInstance.upstreamPool.Exchange(requestContext, queryMessage)
+	// Always ask upstreams for a large EDNS buffer so responses are not
+	// truncated at 512 bytes; honor the client's advertised size when given,
+	// but never propagate the DNSSEC DO bit.
+	upstreamQuery := queryMessage
+	if optRecord := upstreamQuery.IsEdns0(); optRecord == nil {
+		upstreamQuery = queryMessage.Copy()
+		upstreamQuery.SetEdns0(4096, false)
+	} else if optRecord.Do() {
+		upstreamQuery = queryMessage.Copy()
+		upstreamQuery.SetEdns0(optRecord.UDPSize(), false)
+	}
+	upstreamResponse, err := resolverInstance.upstreamPool.Exchange(requestContext, upstreamQuery)
+	if err == nil && upstreamResponse.Truncated {
+		retryQuery := upstreamQuery.Copy()
+		retryQuery.SetEdns0(65535, false)
+		upstreamResponse, err = resolverInstance.upstreamPool.Exchange(requestContext, retryQuery)
+	}
 	if err != nil {
 		failureResponse := new(dns.Msg)
 		failureResponse.SetReply(queryMessage)
 		failureResponse.Rcode = dns.RcodeServerFailure
 		return failureResponse, nil
 	}
-	if resolverInstance.cacheStore != nil {
+	if queryMessage.IsEdns0() == nil {
+		dnscodec.StripOPT(upstreamResponse)
+	}
+	if !upstreamResponse.Truncated && resolverInstance.cacheStore != nil {
 		resolverInstance.cacheStore.Set(question, upstreamResponse)
 	}
 	return upstreamResponse, nil

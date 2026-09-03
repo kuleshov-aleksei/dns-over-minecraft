@@ -19,7 +19,11 @@ var (
 )
 
 const (
+	// magicMinimal (v1) carries no EDNS; magicEdns (v2) adds a 1-byte EDNS
+	// buffer size field right after the magic so the server can size upstream
+	// requests. Only the buffer size is propagated; DNSSEC (DO/CD) is not.
 	magicMinimal byte = 0xFF
+	magicEdns    byte = 0xFE
 	tldRaw       byte = 0x00
 	// 1..99 allocated, 100..254 reserved, 255 == magic
 	tldReservedStart byte = 100
@@ -90,7 +94,12 @@ func EncodeQuery(queryMessage *dns.Msg) (string, error) {
 		namePart = packLabels(labels)
 	}
 	var buffer bytes.Buffer
-	buffer.WriteByte(magicMinimal)
+	if optRecord := queryMessage.IsEdns0(); optRecord != nil {
+		buffer.WriteByte(magicEdns)
+		buffer.WriteByte(encodeEdnsSize(optRecord))
+	} else {
+		buffer.WriteByte(magicMinimal)
+	}
 	buffer.WriteByte(code)
 	var varintBuffer [binary.MaxVarintLen64]byte
 	varintLength := binary.PutUvarint(varintBuffer[:], uint64(question.Qtype))
@@ -98,6 +107,20 @@ func EncodeQuery(queryMessage *dns.Msg) (string, error) {
 	buffer.Write(namePart)
 	encodedQuery := base32Encoding.EncodeToString(buffer.Bytes())
 	return strings.ToLower(encodedQuery), nil
+}
+
+// encodeEdnsSize maps a client's advertised EDNS UDP buffer size to a single
+// byte (size/256, so 512->2, 4096->16). Sub-256 precision is lost but a
+// conservative (smaller) size is always safe.
+func encodeEdnsSize(optRecord *dns.OPT) byte {
+	size := optRecord.UDPSize()
+	if size < 512 {
+		size = 512
+	}
+	if size > 65535 {
+		size = 65535
+	}
+	return byte(size / 256)
 }
 
 // DecodeQuery decodes serverAddress (with suffix already stripped) to dns.Msg.
@@ -118,17 +141,30 @@ func DecodeQuery(encodedQuery string, suffix string) (*dns.Msg, error) {
 	if len(wireBytes) == 0 {
 		return nil, errors.New("empty wire")
 	}
-	if wireBytes[0] != magicMinimal {
-		return nil, fmt.Errorf("invalid magic 0x%02x (want 0x%02x minimal format)", wireBytes[0], magicMinimal)
+	var code byte
+	var ednsSize uint16
+	var payloadStart int
+	switch wireBytes[0] {
+	case magicMinimal:
+		if len(wireBytes) < 3 {
+			return nil, fmt.Errorf("wire too short %d (want >=3 minimal)", len(wireBytes))
+		}
+		code = wireBytes[1]
+		payloadStart = 2
+	case magicEdns:
+		if len(wireBytes) < 4 {
+			return nil, fmt.Errorf("wire too short %d (want >=4 edns format)", len(wireBytes))
+		}
+		ednsSize = uint16(wireBytes[1]) * 256
+		code = wireBytes[2]
+		payloadStart = 3
+	default:
+		return nil, fmt.Errorf("invalid magic 0x%02x (want 0x%02x minimal or 0x%02x edns format)", wireBytes[0], magicMinimal, magicEdns)
 	}
-	if len(wireBytes) < 3 {
-		return nil, fmt.Errorf("wire too short %d (want >=3 minimal)", len(wireBytes))
-	}
-	code := wireBytes[1]
 	if code >= tldReservedStart && code <= 254 {
 		return nil, fmt.Errorf("reserved TLD code %d (100-254)", code)
 	}
-	reader := bytes.NewReader(wireBytes[2:])
+	reader := bytes.NewReader(wireBytes[payloadStart:])
 	qtypeValue, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return nil, fmt.Errorf("read qtype varint: %w", err)
@@ -178,6 +214,9 @@ func DecodeQuery(encodedQuery string, suffix string) (*dns.Msg, error) {
 	decodedMessage.SetQuestion(dns.Fqdn(domainName), uint16(qtypeValue))
 	decodedMessage.RecursionDesired = true
 	decodedMessage.Id = 0
+	if ednsSize > 0 {
+		decodedMessage.SetEdns0(ednsSize, false)
+	}
 	return decodedMessage, nil
 }
 
@@ -264,6 +303,23 @@ func DecodeResponse(encodedResponse string) (*dns.Msg, error) {
 		return nil, err
 	}
 	return decodedMessage, nil
+}
+
+// StripOPT removes the EDNS OPT pseudo-record from a message's extra section.
+// RFC 6891: a server MUST NOT include an OPT RR in a response unless the
+// request carried one, so responses to plain queries have it removed.
+func StripOPT(responseMessage *dns.Msg) {
+	if responseMessage == nil {
+		return
+	}
+	filteredExtra := make([]dns.RR, 0, len(responseMessage.Extra))
+	for _, resourceRecord := range responseMessage.Extra {
+		if _, isOptRecord := resourceRecord.(*dns.OPT); isOptRecord {
+			continue
+		}
+		filteredExtra = append(filteredExtra, resourceRecord)
+	}
+	responseMessage.Extra = filteredExtra
 }
 
 // BuildStatusJSON builds the MC status JSON with base64 response in description.

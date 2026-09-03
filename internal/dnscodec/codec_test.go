@@ -76,6 +76,84 @@ func TestEncodeDecodeQuery_Roundtrip(testingInstance *testing.T) {
 	}
 }
 
+func TestEncodeDecodeQuery_EDNS(testingInstance *testing.T) {
+	baseQuery := makeMessage(testingInstance, "example.com", dns.TypeA)
+
+	testingInstance.Run("no EDNS stays v1", func(innerTesting *testing.T) {
+		encodedQuery, err := EncodeQuery(baseQuery)
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		wireBytes, _ := enc32NoPad.DecodeString(strings.ToUpper(encodedQuery))
+		if wireBytes[0] != magicMinimal {
+			innerTesting.Fatalf("no-EDNS query should use v1 magic 0xFF, got %#x", wireBytes[0])
+		}
+		decodedMessage, err := DecodeQuery(encodedQuery, "")
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		if decodedMessage.IsEdns0() != nil {
+			innerTesting.Fatalf("no-EDNS query should decode without OPT")
+		}
+	})
+
+	testingInstance.Run("EDNS size propagated", func(innerTesting *testing.T) {
+		queryWithEdns := baseQuery.Copy()
+		queryWithEdns.SetEdns0(4096, false)
+		encodedQuery, err := EncodeQuery(queryWithEdns)
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		wireBytes, _ := enc32NoPad.DecodeString(strings.ToUpper(encodedQuery))
+		if wireBytes[0] != magicEdns {
+			innerTesting.Fatalf("EDNS query should use v2 magic 0xFE, got %#x", wireBytes[0])
+		}
+		if wireBytes[1] != 16 {
+			innerTesting.Fatalf("edns size byte %d, want 16 (4096/256)", wireBytes[1])
+		}
+		decodedMessage, err := DecodeQuery(encodedQuery, "")
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		optRecord := decodedMessage.IsEdns0()
+		if optRecord == nil {
+			innerTesting.Fatalf("EDNS query should decode with OPT")
+		}
+		if optRecord.UDPSize() != 4096 {
+			innerTesting.Fatalf("udp size %d, want 4096", optRecord.UDPSize())
+		}
+		if optRecord.Do() {
+			innerTesting.Fatalf("DO bit must not propagate (DNSSEC dropped)")
+		}
+	})
+
+	testingInstance.Run("DO bit not propagated", func(innerTesting *testing.T) {
+		queryWithDo := baseQuery.Copy()
+		queryWithDo.SetEdns0(4096, true)
+		encodedQuery, _ := EncodeQuery(queryWithDo)
+		decodedMessage, err := DecodeQuery(encodedQuery, "")
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		if optRecord := decodedMessage.IsEdns0(); optRecord == nil || optRecord.Do() {
+			innerTesting.Fatalf("DO must be cleared, got %+v", optRecord)
+		}
+	})
+
+	testingInstance.Run("size rounds down conservatively", func(innerTesting *testing.T) {
+		queryWithEdns := baseQuery.Copy()
+		queryWithEdns.SetEdns0(1232, false)
+		encodedQuery, _ := EncodeQuery(queryWithEdns)
+		decodedMessage, err := DecodeQuery(encodedQuery, "")
+		if err != nil {
+			innerTesting.Fatal(err)
+		}
+		if got := decodedMessage.IsEdns0().UDPSize(); got != 1024 {
+			innerTesting.Fatalf("udp size %d, want 1024 (1232 rounded down)", got)
+		}
+	})
+}
+
 func TestEncodeCompressesHeader(testingInstance *testing.T) {
 	queryMessage := makeMessage(testingInstance, "google.com", dns.TypeA)
 	encodedQuery, err := EncodeQuery(queryMessage)

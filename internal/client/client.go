@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/cache"
+	"github.com/dns-over-minecraft/dns-over-minecraft/internal/dnscodec"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/mc"
 	"github.com/miekg/dns"
 )
@@ -57,6 +58,9 @@ func (clientInstance *Client) Resolve(requestContext context.Context, queryMessa
 		serverAddress := clientInstance.pickServer()
 		responseMessage, err := clientInstance.queryFunc(serverAddress, clientInstance.suffix, queryMessage)
 		if err == nil {
+			if queryMessage.IsEdns0() == nil {
+				dnscodec.StripOPT(responseMessage)
+			}
 			if clientInstance.cacheStore != nil {
 				clientInstance.cacheStore.Set(question, responseMessage)
 			}
