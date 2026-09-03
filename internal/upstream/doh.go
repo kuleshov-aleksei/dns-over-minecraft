@@ -46,13 +46,6 @@ func (dohUpstream *DoH) Exchange(requestContext context.Context, queryMessage *d
 	httpRequest.Header.Set("Content-Type", "application/dns-message")
 	httpRequest.Header.Set("Accept", "application/dns-message")
 
-	if deadline, exists := requestContext.Deadline(); exists {
-		remainingDuration := time.Until(deadline)
-		if remainingDuration < dohUpstream.timeout && remainingDuration > 0 {
-			dohUpstream.client.Timeout = remainingDuration
-		}
-	}
-
 	httpResponse, err := dohUpstream.client.Do(httpRequest)
 	if err != nil {
 		return nil, err

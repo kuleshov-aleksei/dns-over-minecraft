@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -13,6 +14,7 @@ type fakeUpstream struct {
 	priority int
 	response *dns.Msg
 	err      error
+	delay    time.Duration
 	hits     int
 }
 
@@ -20,6 +22,9 @@ func (fakeUpstreamInstance *fakeUpstream) Name() string { return fakeUpstreamIns
 func (fakeUpstreamInstance *fakeUpstream) Priority() int { return fakeUpstreamInstance.priority }
 func (fakeUpstreamInstance *fakeUpstream) Exchange(requestContext context.Context, queryMessage *dns.Msg) (*dns.Msg, error) {
 	fakeUpstreamInstance.hits++
+	if fakeUpstreamInstance.delay > 0 {
+		time.Sleep(fakeUpstreamInstance.delay)
+	}
 	return fakeUpstreamInstance.response, fakeUpstreamInstance.err
 }
 
@@ -101,5 +106,46 @@ func TestPool_Exchange_Fallback(testingInstance *testing.T) {
 	_, errFifth := emptyPool.Exchange(context.Background(), queryMessage)
 	if !errors.Is(errFifth, context.DeadlineExceeded) {
 		testingInstance.Fatalf("empty pool want DeadlineExceeded, got %v", errFifth)
+	}
+}
+
+func TestPool_EWMAOrdersSamePriority(testingInstance *testing.T) {
+	queryMessage := makeMessage(testingInstance, "example.com")
+	wantedResponse := makeMessage(testingInstance, "example.com")
+	wantedResponse.SetReply(queryMessage)
+	slowUpstream := &fakeUpstream{name: "a-slow", priority: 5, response: wantedResponse, delay: 15 * time.Millisecond}
+	fastUpstream := &fakeUpstream{name: "z-fast", priority: 5, response: wantedResponse, delay: time.Millisecond}
+	upstreamPool := NewPool([]Upstream{slowUpstream, fastUpstream})
+
+	if upstreamPool.List()[0].Name() != "a-slow" {
+		testingInstance.Fatalf("initial order should be name-ascending (a-slow), got %s", upstreamPool.List()[0].Name())
+	}
+	for index := 0; index < 8; index++ {
+		if _, err := upstreamPool.Exchange(context.Background(), queryMessage); err != nil {
+			testingInstance.Fatalf("exchange err: %v", err)
+		}
+	}
+	orderedUpstreams := upstreamPool.List()
+	if orderedUpstreams[0].Name() != "z-fast" {
+		testingInstance.Fatalf("faster upstream should be tried first, got %s", orderedUpstreams[0].Name())
+	}
+}
+
+func TestPool_EWMAKeepsPriorityTiers(testingInstance *testing.T) {
+	queryMessage := makeMessage(testingInstance, "example.com")
+	wantedResponse := makeMessage(testingInstance, "example.com")
+	wantedResponse.SetReply(queryMessage)
+	highPrioritySlowUpstream := &fakeUpstream{name: "high", priority: 10, response: wantedResponse, delay: 20 * time.Millisecond}
+	lowPriorityFastUpstream := &fakeUpstream{name: "low", priority: 5, response: wantedResponse, delay: time.Millisecond}
+	upstreamPool := NewPool([]Upstream{lowPriorityFastUpstream, highPrioritySlowUpstream})
+
+	for index := 0; index < 8; index++ {
+		if _, err := upstreamPool.Exchange(context.Background(), queryMessage); err != nil {
+			testingInstance.Fatalf("exchange err: %v", err)
+		}
+	}
+	orderedUpstreams := upstreamPool.List()
+	if orderedUpstreams[0].Name() != "high" {
+		testingInstance.Fatalf("higher priority tier must be tried first despite being slower, got %s", orderedUpstreams[0].Name())
 	}
 }
