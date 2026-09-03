@@ -15,9 +15,9 @@ import (
 )
 
 type Server struct {
-	Addr     string
-	Suffix   string
-	Resolver *resolver.Resolver
+	Addr            string
+	Suffix          string
+	Resolver        *resolver.Resolver
 	MOTD            string
 	VersionName     string
 	VersionProtocol int
@@ -29,6 +29,7 @@ type Server struct {
 	LogPerformance  bool
 	LogAnalytics    bool
 	LogInterval     time.Duration
+	fragments       *fragmentAssembler
 }
 
 const defaultLogInterval = 30 * time.Second
@@ -40,6 +41,7 @@ func (serverInstance *Server) ListenAndServe(requestContext context.Context) err
 	}
 	defer listener.Close()
 	log.Printf("dnsmc server listening on %s (suffix=%q)", serverInstance.Addr, serverInstance.Suffix)
+	serverInstance.fragments = newFragmentAssembler()
 
 	go func() {
 		<-requestContext.Done()
@@ -98,6 +100,10 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 	_ = payload
 
 	bareAddress := dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix)
+	if serverInstance.isFragmented(handshake, bareAddress) {
+		serverInstance.handleFragmentConnection(connection, handshake, bareAddress)
+		return
+	}
 	queryMessage, err := dnscodec.DecodeQuery(bareAddress, "")
 	if err != nil {
 		hasSuffix := serverInstance.Suffix != "" && dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix) != handshake.ServerAddress
@@ -138,19 +144,95 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 	if err != nil {
 		base64Response, _ = dnscodec.EncodeResponse(dnscodec.BuildErrorResponse(queryMessage, 2))
 	}
-	rawJSON := dnscodec.BuildStatusJSON(base64Response)
+	serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(base64Response))
+	serverInstance.handlePing(connection)
+}
 
+const fragmentAckMarker = "fragment-ack"
+
+// isFragmented reports whether a handshake is one piece of a multi-ping
+// fragmented query: address shape "n.<nonce>.<piece>.<suffix>" plus sane
+// fragment index/total encoded in the handshake ServerPort.
+func (serverInstance *Server) isFragmented(handshake *Handshake, bareAddress string) bool {
+	if !strings.HasPrefix(bareAddress, "n.") {
+		return false
+	}
+	parts := strings.Split(bareAddress, ".")
+	if len(parts) < 3 || len(parts[1]) != 4 {
+		return false
+	}
+	index := int(handshake.ServerPort >> 8)
+	total := int(handshake.ServerPort & 0xFF)
+	return index >= 1 && index <= total && total >= minFragmentPieces && total <= maxFragmentPieces
+}
+
+func (serverInstance *Server) handleFragmentConnection(connection net.Conn, handshake *Handshake, bareAddress string) {
+	parts := strings.Split(bareAddress, ".")
+	nonce := parts[1]
+	piece := strings.Join(parts[2:], "")
+	index := int(handshake.ServerPort >> 8)
+	total := int(handshake.ServerPort & 0xFF)
+	key := fragmentKey{clientIP: remoteIP(connection), nonce: nonce}
+
+	set, completer := serverInstance.fragments.add(key, index, total, piece)
+
+	var responseMessage *dns.Msg
+	switch {
+	case completer:
+		bareQuery := set.reassemble()
+		queryMessage, decodeErr := dnscodec.DecodeQuery(bareQuery, "")
+		if decodeErr != nil || serverInstance.Resolver == nil {
+			responseMessage = dnscodec.BuildErrorResponse(nil, 2)
+			set.storeResult(responseMessage, decodeErr)
+			break
+		}
+		var resolveErr error
+		timeoutContext, cancelFunc := context.WithTimeout(context.Background(), 4*time.Second)
+		responseMessage, resolveErr = serverInstance.Resolver.Resolve(timeoutContext, queryMessage)
+		cancelFunc()
+		if resolveErr != nil {
+			responseMessage = dnscodec.BuildErrorResponse(queryMessage, 2)
+		}
+		if serverInstance.LogQueries && len(queryMessage.Question) > 0 {
+			question := queryMessage.Question[0]
+			log.Printf("dnsmc server: fragment query from %s: %s %s -> %s (%d frags)",
+				connection.RemoteAddr(), question.Name, dns.TypeToString[question.Qtype],
+				dns.RcodeToString[responseMessage.Rcode], total)
+		}
+		set.storeResult(responseMessage, resolveErr)
+	case index == total:
+		var waitErr error
+		responseMessage, waitErr = set.waitResult()
+		if waitErr != nil {
+			responseMessage = dnscodec.BuildErrorResponse(nil, 2)
+		}
+	default:
+		serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(fragmentAckMarker))
+		serverInstance.handlePing(connection)
+		return
+	}
+
+	base64Response, _ := dnscodec.EncodeResponse(responseMessage)
+	serverInstance.writeStatusJSON(connection, dnscodec.BuildStatusJSON(base64Response))
+	serverInstance.handlePing(connection)
+}
+
+func (serverInstance *Server) writeStatusJSON(connection net.Conn, rawJSON []byte) {
 	var jsonRawMessage json.RawMessage
 	if json.Unmarshal(rawJSON, &jsonRawMessage) != nil {
 		log.Printf("invalid json generated")
 		return
 	}
-
 	if _, err := connection.Write(EncodeStatusResponseJSON(rawJSON)); err != nil {
 		return
 	}
+}
 
-	serverInstance.handlePing(connection)
+func remoteIP(connection net.Conn) string {
+	if tcpAddress, ok := connection.RemoteAddr().(*net.TCPAddr); ok {
+		return tcpAddress.IP.String()
+	}
+	return connection.RemoteAddr().String()
 }
 
 func (serverInstance *Server) handlePing(connection net.Conn) {

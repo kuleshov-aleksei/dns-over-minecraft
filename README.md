@@ -61,6 +61,17 @@ Server logging is off by default; enable per-category with `logging.queries`, `l
 
 Wire vanilla-identical: `Handshake(nextState=1) + StatusRequest`, suffix `.mc`, base32 query, base64 response in Status JSON.
 
+The query wire is versioned: v1 (`0xFF` magic) has no EDNS; v2 (`0xFE` magic) adds a 1-byte
+EDNS buffer-size field so the client's advertised size travels end-to-end. `0xFF` queries still
+decode. DNSSEC (DO/CD) is intentionally not propagated. Upstreams always receive an EDNS 4096
+request (or the client's size) so large responses aren't truncated; a truncated answer is retried
+once with a 65535 buffer and never cached. The OPT pseudo-record is stripped from responses to
+clients that sent none.
+
+Queries whose encoded address would exceed 255 chars are **auto-fragmented**: the base32 query is
+split across multiple handshake/status connections (`n.<nonce>.<piece>.<suffix>`, index/total
+encoded in the handshake port), reassembled server-side, and answered on the final fragment.
+
 ## System service
 
 See `deploy/dnsmc.service` (server) and `deploy/dnsmc-client.service` (client).

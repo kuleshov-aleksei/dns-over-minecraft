@@ -172,7 +172,7 @@ func runEncode(arguments []string, configPath, suffixOverride string) {
 	fmt.Printf("hosts:   127.0.0.1  %s\n", fullAddress)
 	fmt.Printf("len:     %d (bare) + %d (suffix) = %d / 255 max ServerAddress\n", len(encodedQuery), len(effectiveSuffix), len(fullAddress))
 	if len(fullAddress) > 255 {
-		fmt.Printf("WARN: exceeds 255 char ServerAddress limit, query will fail with FORMERR\n")
+		fmt.Printf("NOTE: exceeds 255 char ServerAddress limit; the dnsmc client will auto-fragment this query across multiple pings\n")
 	}
 	if len(encodedQuery) > 63 && !strings.Contains(encodedQuery, ".") {
 		fmt.Printf("NOTE: bare >63 chars, some resolvers/hosts may reject single label. Use chunked form.\n")
