@@ -54,7 +54,7 @@ cache hits. Override with `RESOLVER=`, `PORT=`, `QUERIES=`, `DELAY=`.
 
 ## Config
 
-See `config.yaml.example`. `priority` low = tried first (5 before 10 before 15). Fallback sequential.
+See `config.yaml.example`. `priority` high - tried first (15 before 10 before 5). Fallback sequential.
 Server logging is off by default; enable per-category with `logging.queries`, `logging.performance` (RPS + cache hit/miss rate), or `logging.analytics` (top 10 domains, all-time + last interval), reported every `logging.interval`.
 
 ## Protocol

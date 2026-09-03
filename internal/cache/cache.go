@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 type entry struct {
 	message   *dns.Msg
+	storedAt  time.Time
 	expiresAt time.Time
 }
 
@@ -39,7 +41,7 @@ func New(cacheSize int, cacheTTL, negativeCacheTTL time.Duration) *Cache {
 }
 
 func cacheKey(question dns.Question) string {
-	return question.Name + "/" + dns.ClassToString[question.Qclass] + "/" + dns.TypeToString[question.Qtype]
+	return strings.ToLower(dns.Fqdn(question.Name)) + "/" + dns.ClassToString[question.Qclass] + "/" + dns.TypeToString[question.Qtype]
 }
 
 func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
@@ -49,15 +51,35 @@ func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
 	if !exists {
 		return nil, false
 	}
-	if time.Now().After(cachedEntry.expiresAt) {
+	now := time.Now()
+	if now.After(cachedEntry.expiresAt) {
 		cacheInstance.mutex.Lock()
 		delete(cacheInstance.items, cacheKey(question))
 		cacheInstance.mutex.Unlock()
 		return nil, false
 	}
+	elapsedSeconds := uint32(now.Sub(cachedEntry.storedAt).Seconds())
+	if elapsedSeconds > 0 {
+		for _, resourceRecord := range cachedEntry.message.Answer {
+			resourceRecord.Header().Ttl = decrementedTTL(resourceRecord.Header().Ttl, elapsedSeconds)
+		}
+		for _, resourceRecord := range cachedEntry.message.Ns {
+			resourceRecord.Header().Ttl = decrementedTTL(resourceRecord.Header().Ttl, elapsedSeconds)
+		}
+		for _, resourceRecord := range cachedEntry.message.Extra {
+			resourceRecord.Header().Ttl = decrementedTTL(resourceRecord.Header().Ttl, elapsedSeconds)
+		}
+	}
 	copiedMessage := cachedEntry.message.Copy()
 	copiedMessage.Id = 0 // caller will set
 	return copiedMessage, true
+}
+
+func decrementedTTL(currentTTL, elapsedSeconds uint32) uint32 {
+	if currentTTL <= elapsedSeconds {
+		return 0
+	}
+	return currentTTL - elapsedSeconds
 }
 
 func (cacheInstance *Cache) Set(question dns.Question, responseMessage *dns.Msg) {
@@ -90,5 +112,6 @@ func (cacheInstance *Cache) Set(question dns.Question, responseMessage *dns.Msg)
 		}
 	}
 	copiedMessage := responseMessage.Copy()
-	cacheInstance.items[cacheKey(question)] = &entry{message: copiedMessage, expiresAt: time.Now().Add(computedTTL)}
+	now := time.Now()
+	cacheInstance.items[cacheKey(question)] = &entry{message: copiedMessage, storedAt: now, expiresAt: now.Add(computedTTL)}
 }
