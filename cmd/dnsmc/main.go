@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/cache"
+	"github.com/dns-over-minecraft/dns-over-minecraft/internal/client"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/config"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/dnscodec"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/mc"
@@ -25,15 +26,17 @@ import (
 func main() {
 	var (
 		serverMode     = flag.Bool("S", false, "run as server")
-		listenAddress  = flag.String("listen", "", "listen addr (server mode)")
+		clientMode     = flag.Bool("C", false, "run as local DNS client service")
+		listenAddress  = flag.String("listen", "", "listen addr (server or client service mode)")
 		configPath     = flag.String("config", "config.yaml", "config file path")
 		suffixOverride = flag.String("suffix", "", "suffix override (e.g. .mc)")
-		serverAddress  = flag.String("server", "127.0.0.1:25565", "server addr for client query")
+		serverAddress  = flag.String("server", "", "server addr for client query (default 127.0.0.1:25565)")
 		ipFlag         = flag.String("ip", "127.0.0.1", "IP for hosts command")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage:
   dnsmc -S [-listen :25565] [-config config.yaml]              # server
+  dnsmc -C [-listen 127.0.0.1:53] [-config config.yaml]       # local DNS client service
   dnsmc [options] <name> [type]                               # client query
   dnsmc encode <name> [type] [-suffix .mc]                    # print base32 for /etc/hosts + vanilla
   dnsmc decode <base64>                                       # decode description.text from vanilla ping
@@ -54,6 +57,11 @@ Examples:
 
 	if *serverMode {
 		runServer(*configPath, *listenAddress, *suffixOverride)
+		return
+	}
+
+	if *clientMode {
+		runClientService(*configPath, *listenAddress, *suffixOverride, *serverAddress)
 		return
 	}
 
@@ -85,13 +93,25 @@ Examples:
 		log.Fatalf("unknown qtype %q", queryTypeString)
 	}
 
-	effectiveSuffix := effectiveSuffix(*configPath, *suffixOverride)
+	loadedConfig, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("config load: %v", err)
+	}
+	effectiveSuffixValue := loadedConfig.Suffix
+	if *suffixOverride != "" {
+		effectiveSuffixValue = *suffixOverride
+	}
+	serverAddr := *serverAddress
+	if serverAddr == "" {
+		serverAddr = "127.0.0.1:25565"
+	}
+	clientInstance := buildClient(loadedConfig, []string{serverAddr}, effectiveSuffixValue)
 
 	queryMessage := new(dns.Msg)
 	queryMessage.SetQuestion(dns.Fqdn(domainName), queryType)
 	queryMessage.RecursionDesired = true
 
-	responseMessage, err := mc.Query(*serverAddress, effectiveSuffix, queryMessage)
+	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
 	if err != nil {
 		log.Fatalf("query failed: %v", err)
 	}
@@ -260,6 +280,40 @@ func runDecode(arguments []string) {
 	}
 	for _, resourceRecord := range decodedResponse.Extra {
 		fmt.Println(resourceRecord.String())
+	}
+}
+
+func buildClient(loadedConfig config.Config, servers []string, suffix string) *client.Client {
+	cacheStore := cache.New(loadedConfig.Client.Cache.Size, loadedConfig.Client.Cache.TTL, loadedConfig.Client.Cache.NegativeTTL)
+	return client.New(servers, suffix, cacheStore, nil)
+}
+
+func runClientService(configPath, listenOverride, suffixOverride, serverOverride string) {
+	loadedConfig, err := config.Load(configPath)
+	if err != nil {
+		log.Fatalf("config load: %v", err)
+	}
+	effectiveSuffixValue := loadedConfig.Suffix
+	if suffixOverride != "" {
+		effectiveSuffixValue = suffixOverride
+	}
+	listenAddress := loadedConfig.Client.Listen
+	if listenOverride != "" {
+		listenAddress = listenOverride
+	}
+	servers := loadedConfig.Client.Servers
+	if serverOverride != "" {
+		servers = []string{serverOverride}
+	}
+
+	clientInstance := buildClient(loadedConfig, servers, effectiveSuffixValue)
+	log.Printf("dnsmc client service: upstream servers=%v suffix=%q", servers, effectiveSuffixValue)
+
+	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelFunc()
+
+	if err := clientInstance.ListenAndServe(requestContext, listenAddress); err != nil {
+		log.Fatalf("client: %v", err)
 	}
 }
 

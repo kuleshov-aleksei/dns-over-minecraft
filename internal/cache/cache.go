@@ -61,6 +61,9 @@ func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
 }
 
 func (cacheInstance *Cache) Set(question dns.Question, responseMessage *dns.Msg) {
+	if responseMessage == nil || responseMessage.Rcode == dns.RcodeNameError {
+		return
+	}
 	computedTTL := cacheInstance.ttl
 	if len(responseMessage.Answer) > 0 {
 		minimumTTL := uint32(computedTTL.Seconds())

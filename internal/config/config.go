@@ -11,6 +11,7 @@ type Config struct {
 	Listen        string         `yaml:"listen"`
 	Suffix        string         `yaml:"suffix"`
 	Server        ServerConfig   `yaml:"server"`
+	Client        ClientConfig   `yaml:"client"`
 	Cache         CacheConfig    `yaml:"cache"`
 	Upstreams     []Upstream     `yaml:"upstreams"`
 	CustomRecords []CustomRecord `yaml:"customRecords"`
@@ -35,6 +36,13 @@ type CacheConfig struct {
 	Size        int           `yaml:"size"`
 	TTL         time.Duration `yaml:"ttl"`
 	NegativeTTL time.Duration `yaml:"negativeTtl"`
+}
+
+type ClientConfig struct {
+	Listen  string      `yaml:"listen"`
+	Suffix  string      `yaml:"suffix"`
+	Servers []string    `yaml:"servers"`
+	Cache   CacheConfig `yaml:"cache"`
 }
 
 type Upstream struct {
@@ -74,6 +82,15 @@ func Default() Config {
 			Size:        2048,
 			TTL:         5 * time.Minute,
 			NegativeTTL: 30 * time.Second,
+		},
+		Client: ClientConfig{
+			Listen:  "127.0.0.1:53",
+			Servers: []string{"127.0.0.1:25565"},
+			Cache: CacheConfig{
+				Size:        2048,
+				TTL:         5 * time.Minute,
+				NegativeTTL: 30 * time.Second,
+			},
 		},
 		Upstreams: []Upstream{
 			{Name: "1.1.1.1-tcp", Type: "tcp", Addr: "1.1.1.1:53", Priority: 5, Timeout: 2 * time.Second},
@@ -126,6 +143,21 @@ func Load(configPath string) (Config, error) {
 	}
 	if configuration.Cache.Size == 0 {
 		configuration.Cache.Size = 2048
+	}
+	if configuration.Client.Listen == "" {
+		configuration.Client.Listen = "127.0.0.1:53"
+	}
+	if len(configuration.Client.Servers) == 0 {
+		configuration.Client.Servers = []string{"127.0.0.1:25565"}
+	}
+	if configuration.Client.Cache.TTL == 0 {
+		configuration.Client.Cache.TTL = 5 * time.Minute
+	}
+	if configuration.Client.Cache.NegativeTTL == 0 {
+		configuration.Client.Cache.NegativeTTL = 30 * time.Second
+	}
+	if configuration.Client.Cache.Size == 0 {
+		configuration.Client.Cache.Size = 2048
 	}
 	return configuration, nil
 }

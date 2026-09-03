@@ -29,3 +29,5 @@ go.work
 dnsmc
 !cmd/dnsmc
 config.yaml
+config.client.yaml
+TODO.md

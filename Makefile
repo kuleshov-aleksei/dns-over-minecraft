@@ -1,15 +1,18 @@
 BINARY      := dnsmc
 CMD         := ./cmd/dnsmc
 CONFIG      ?= config.yaml
+CLIENT_CONFIG ?= config.client.yaml
 LISTEN      ?= :25565
+CLIENT_LISTEN ?=          # local DNS listen addr for client-service (empty -> config client.listen)
 SERVER      ?= 127.0.0.1:25565
 SUFFIX      ?= .mc
 NAME        ?= mybox.mc
 TYPE        ?= A
 
 GOFLAGS     :=
+CLIENT_LISTEN_ARGS = $(if $(CLIENT_LISTEN),-listen $(CLIENT_LISTEN),)
 
-.PHONY: help build run-server server query client vet test clean docker docker-run
+.PHONY: help build run-server server query client client-service vet test clean docker docker-run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -34,6 +37,11 @@ query: build ## Query via MC ping: make query NAME=example.com TYPE=A SERVER=127
 	./$(BINARY) -config $(CONFIG) -server $(SERVER) -suffix $(SUFFIX) $(NAME) $(TYPE)
 
 client: query ## Alias for query
+
+# Run the client as a local DNS service (UDP+TCP). CLIENT_LISTEN overridable.
+client-service: build ## Run local DNS client service
+	@if [ ! -f "$(CLIENT_CONFIG)" ] && [ -f "config.client.yaml.example" ]; then echo "=> $(CLIENT_CONFIG) not found, using config.client.yaml.example"; cp config.client.yaml.example $(CLIENT_CONFIG); fi
+	./$(BINARY) -C -config $(CLIENT_CONFIG) $(CLIENT_LISTEN_ARGS) -suffix $(SUFFIX)
 
 # Example: make query-custom NAME=hello.mc TYPE=TXT
 query-custom: query

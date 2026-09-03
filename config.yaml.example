@@ -16,6 +16,7 @@ cache:
   size: 2048
   ttl: 5m
   negativeTtl: 30s
+# client service settings live in config.client.yaml.example
 upstreams:
   - name: "1.1.1.1-tcp"
     type: tcp
