@@ -198,3 +198,67 @@ func TestClient_RoundRobin(testingInstance *testing.T) {
 		testingInstance.Fatalf("round-robin order %v, want %v", seenServers, want)
 	}
 }
+
+func TestClient_FailoverToHealthyServer(testingInstance *testing.T) {
+	healthyResponse := makeQuery(testingInstance, "failover.example.com", dns.TypeA, 1)
+	healthyResponse.Answer = []dns.RR{makeAnswer("failover.example.com", "1.1.1.1")}
+
+	unreachableServers := map[string]bool{"server-a:25565": true}
+	var seenServers []string
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		seenServers = append(seenServers, serverAddress)
+		if unreachableServers[serverAddress] {
+			return nil, errors.New("connection refused")
+		}
+		responseMessage := healthyResponse.Copy()
+		responseMessage.Id = queryMessage.Id
+		responseMessage.Question = queryMessage.Question
+		return responseMessage, nil
+	}
+	clientInstance := New([]string{"server-a:25565", "server-b:25565", "server-c:25565"}, ".mc", nil, queryFunc)
+
+	queryMessage := makeQuery(testingInstance, "failover.example.com", dns.TypeA, 800)
+	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	if responseMessage.Rcode != dns.RcodeSuccess {
+		testingInstance.Fatalf("want success, got %d", responseMessage.Rcode)
+	}
+	if !reflect.DeepEqual(seenServers, []string{"server-a:25565", "server-b:25565"}) {
+		testingInstance.Fatalf("failover attempts %v, want [a b]", seenServers)
+	}
+
+	seenServers = nil
+	queryMessageSecond := makeQuery(testingInstance, "failover.example.com", dns.TypeA, 801)
+	if _, err := clientInstance.Resolve(context.Background(), queryMessageSecond); err != nil {
+		testingInstance.Fatal(err)
+	}
+	if !reflect.DeepEqual(seenServers, []string{"server-c:25565"}) {
+		testingInstance.Fatalf("rotation after failover %v, want [c]", seenServers)
+	}
+}
+
+func TestClient_AllServersFail(testingInstance *testing.T) {
+	var seenServers []string
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		seenServers = append(seenServers, serverAddress)
+		return nil, errors.New("connection refused")
+	}
+	clientInstance := New([]string{"server-a:25565", "server-b:25565"}, ".mc", nil, queryFunc)
+
+	queryMessage := makeQuery(testingInstance, "down.example.com", dns.TypeA, 900)
+	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err == nil {
+		testingInstance.Fatal("want error when all servers unreachable")
+	}
+	if responseMessage.Rcode != dns.RcodeServerFailure {
+		testingInstance.Fatalf("want SERVFAIL, got %d", responseMessage.Rcode)
+	}
+	if len(responseMessage.Question) != 1 {
+		testingInstance.Fatalf("SERVFAIL should preserve question")
+	}
+	if !reflect.DeepEqual(seenServers, []string{"server-a:25565", "server-b:25565"}) {
+		testingInstance.Fatalf("attempts %v, want [a b]", seenServers)
+	}
+}

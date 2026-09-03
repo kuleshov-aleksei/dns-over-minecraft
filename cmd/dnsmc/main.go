@@ -388,6 +388,7 @@ func runServer(configPath, listenOverride, suffixOverride string) {
 		OnlinePlayers:   loadedConfig.Server.OnlinePlayers,
 		Sample:          sampleEntries,
 		Favicon:         loadedConfig.Server.Favicon,
+		LogQueries:      loadedConfig.Logging.Queries,
 	}
 
 	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -36,12 +36,14 @@ dig @127.0.0.1 example.com A
 ```
 
 Client settings live under the `client:` section in `config.client.yaml.example`
-(`listen`, `servers`, `cache`). NXDOMAIN is not cached, neither on the client nor
-the server.
+(`listen`, `servers`, `cache`). Queries rotate round-robin across the `servers`
+list and fail over to the next server when one is unreachable (each failure is
+logged). NXDOMAIN is not cached, neither on the client nor the server.
 
 ## Config
 
 See `config.yaml.example`. `priority` low = tried first (5 before 10 before 15). Fallback sequential.
+Server query logging (name, type, rcode, duration) is off by default; enable with `logging.queries: true`.
 
 ## Protocol
 

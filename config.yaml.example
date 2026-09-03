@@ -17,6 +17,8 @@ cache:
   ttl: 5m
   negativeTtl: 30s
 # client service settings live in config.client.yaml.example
+logging:
+  queries: false # log every DNS query (name, type, result rcode) on the server
 upstreams:
   - name: "1.1.1.1-tcp"
     type: tcp

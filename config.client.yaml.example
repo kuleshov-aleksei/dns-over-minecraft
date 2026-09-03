@@ -5,6 +5,8 @@ suffix: ".mc"
 client:
   listen: "127.0.0.1:53" # local DNS listener (UDP+TCP); :53 needs root or CAP_NET_BIND_SERVICE
   servers:
+    # queries rotate round-robin across servers; unreachable servers are
+    # skipped (and logged) until a healthy one answers
     - "127.0.0.1:25565"
   cache:
     size: 2048

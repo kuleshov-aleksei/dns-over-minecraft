@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/cache"
@@ -51,17 +52,23 @@ func (clientInstance *Client) Resolve(requestContext context.Context, queryMessa
 		}
 	}
 
-	responseMessage, err := clientInstance.queryFunc(clientInstance.pickServer(), clientInstance.suffix, queryMessage)
-	if err != nil {
-		failureResponse := new(dns.Msg)
-		failureResponse.SetReply(queryMessage)
-		failureResponse.Rcode = dns.RcodeServerFailure
-		return failureResponse, err
+	var lastError error
+	for attempt := 0; attempt < len(clientInstance.servers); attempt++ {
+		serverAddress := clientInstance.pickServer()
+		responseMessage, err := clientInstance.queryFunc(serverAddress, clientInstance.suffix, queryMessage)
+		if err == nil {
+			if clientInstance.cacheStore != nil {
+				clientInstance.cacheStore.Set(question, responseMessage)
+			}
+			return responseMessage, nil
+		}
+		lastError = err
+		log.Printf("dnsmc client: server %s unreachable: %v", serverAddress, err)
 	}
-	if clientInstance.cacheStore != nil {
-		clientInstance.cacheStore.Set(question, responseMessage)
-	}
-	return responseMessage, nil
+	failureResponse := new(dns.Msg)
+	failureResponse.SetReply(queryMessage)
+	failureResponse.Rcode = dns.RcodeServerFailure
+	return failureResponse, lastError
 }
 
 func (clientInstance *Client) pickServer() string {

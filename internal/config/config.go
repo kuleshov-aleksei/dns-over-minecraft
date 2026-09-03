@@ -13,6 +13,7 @@ type Config struct {
 	Server        ServerConfig   `yaml:"server"`
 	Client        ClientConfig   `yaml:"client"`
 	Cache         CacheConfig    `yaml:"cache"`
+	Logging       LoggingConfig  `yaml:"logging"`
 	Upstreams     []Upstream     `yaml:"upstreams"`
 	CustomRecords []CustomRecord `yaml:"customRecords"`
 }
@@ -43,6 +44,10 @@ type ClientConfig struct {
 	Suffix  string      `yaml:"suffix"`
 	Servers []string    `yaml:"servers"`
 	Cache   CacheConfig `yaml:"cache"`
+}
+
+type LoggingConfig struct {
+	Queries bool `yaml:"queries"`
 }
 
 type Upstream struct {
@@ -82,6 +87,9 @@ func Default() Config {
 			Size:        2048,
 			TTL:         5 * time.Minute,
 			NegativeTTL: 30 * time.Second,
+		},
+		Logging: LoggingConfig{
+			Queries: false,
 		},
 		Client: ClientConfig{
 			Listen:  "127.0.0.1:53",

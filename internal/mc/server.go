@@ -9,6 +9,7 @@ import (
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/dnscodec"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/resolver"
+	"github.com/miekg/dns"
 )
 
 type Server struct {
@@ -22,6 +23,7 @@ type Server struct {
 	OnlinePlayers   int
 	Sample          []map[string]string
 	Favicon         string
+	LogQueries      bool
 }
 
 func (serverInstance *Server) ListenAndServe(requestContext context.Context) error {
@@ -106,9 +108,16 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 
 	timeoutContext, cancelFunc := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancelFunc()
+	queryStartTime := time.Now()
 	responseMessage, err := serverInstance.Resolver.Resolve(timeoutContext, queryMessage)
 	if err != nil {
 		responseMessage = dnscodec.BuildErrorResponse(queryMessage, 2)
+	}
+	if serverInstance.LogQueries && len(queryMessage.Question) > 0 {
+		question := queryMessage.Question[0]
+		log.Printf("dnsmc server: query from %s: %s %s -> %s (%s)",
+			connection.RemoteAddr(), question.Name, dns.TypeToString[question.Qtype],
+			dns.RcodeToString[responseMessage.Rcode], time.Since(queryStartTime).Round(time.Microsecond))
 	}
 	base64Response, err := dnscodec.EncodeResponse(responseMessage)
 	if err != nil {
