@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -296,6 +297,24 @@ func TestResolver_StatsEmptyQuestionCountsAsMiss(testingInstance *testing.T) {
 	snapshot := resolverInstance.TakeWindow()
 	if snapshot.Total != 1 || snapshot.CacheHits != 0 || snapshot.CacheMisses != 1 {
 		testingInstance.Fatalf("empty question should count as total=1 miss=1, got %+v", snapshot)
+	}
+}
+
+func TestResolver_StatsAllTimePruned(testingInstance *testing.T) {
+	resolverInstance := New(nil, nil, nil)
+	for index := 0; index < maxTrackedDomains+1; index++ {
+		resolverInstance.recordDomain(fmt.Sprintf("d%d.example.com", index))
+	}
+	resolverInstance.statsMutex.Lock()
+	allTimeSize := len(resolverInstance.stats.domainsAll)
+	resolverInstance.statsMutex.Unlock()
+	if allTimeSize != keepTopDomains {
+		testingInstance.Fatalf("all-time map should be pruned to %d, got %d", keepTopDomains, allTimeSize)
+	}
+
+	allTime, _ := resolverInstance.DomainStats(keepTopDomains)
+	if len(allTime) != keepTopDomains {
+		testingInstance.Fatalf("DomainStats should report %d entries, got %d", keepTopDomains, len(allTime))
 	}
 }
 

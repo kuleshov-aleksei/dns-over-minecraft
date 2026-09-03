@@ -23,6 +23,14 @@ type resolverStats struct {
 	domainsWindow map[string]int64
 }
 
+// maxTrackedDomains bounds the all-time domain map before it is pruned back to
+// keepTopDomains entries, so a long-running server does not grow memory with
+// every unique queried domain.
+const (
+	maxTrackedDomains = 1000
+	keepTopDomains    = 100
+)
+
 func (resolverInstance *Resolver) recordTotal() {
 	resolverInstance.statsMutex.Lock()
 	resolverInstance.stats.total++
@@ -45,7 +53,21 @@ func (resolverInstance *Resolver) recordDomain(domainName string) {
 	resolverInstance.statsMutex.Lock()
 	resolverInstance.stats.domainsAll[domainName]++
 	resolverInstance.stats.domainsWindow[domainName]++
+	if len(resolverInstance.stats.domainsAll) > maxTrackedDomains {
+		resolverInstance.pruneDomainsAllLocked()
+	}
 	resolverInstance.statsMutex.Unlock()
+}
+
+// pruneDomainsAllLocked drops all but the top keepTopDomains all-time domains.
+// Caller must hold statsMutex.
+func (resolverInstance *Resolver) pruneDomainsAllLocked() {
+	topEntries := topDomains(resolverInstance.stats.domainsAll, keepTopDomains)
+	prunedMap := make(map[string]int64, len(topEntries))
+	for _, domainEntry := range topEntries {
+		prunedMap[domainEntry.Name] = domainEntry.Count
+	}
+	resolverInstance.stats.domainsAll = prunedMap
 }
 
 func (resolverInstance *Resolver) TakeWindow() Snapshot {
