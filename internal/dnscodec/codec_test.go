@@ -3,6 +3,7 @@ package dnscodec
 import (
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -34,6 +35,8 @@ func TestEncodeDecodeQuery_Roundtrip(testingInstance *testing.T) {
 		{"foo.internal.mc", dns.TypeA},
 		{"sub.domain.example.org", dns.TypeMX},
 		{"a-very-long-subdomain-name-that-still-fits.example.com", dns.TypeA},
+		{"singlelabel", dns.TypeA},
+		{"test.unknowntld999", dns.TypeA}, // fallback raw
 	}
 	for _, testCase := range testCases {
 		testingInstance.Run(testCase.name+"/"+dns.TypeToString[testCase.queryType], func(innerTesting *testing.T) {
@@ -62,13 +65,71 @@ func TestEncodeDecodeQuery_Roundtrip(testingInstance *testing.T) {
 			if question.Qtype != testCase.queryType {
 				innerTesting.Fatalf("qtype %d != %d", question.Qtype, testCase.queryType)
 			}
-			if decodedMessage.Id != originalMessage.Id {
-				innerTesting.Fatalf("id %d != %d", decodedMessage.Id, originalMessage.Id)
+			// Minimal format normalizes Id to 0 and RD to true
+			if decodedMessage.Id != 0 {
+				innerTesting.Fatalf("id %d != 0 (minimal normalizes)", decodedMessage.Id)
 			}
-			if decodedMessage.RecursionDesired != originalMessage.RecursionDesired {
-				innerTesting.Fatalf("RD mismatch")
+			if !decodedMessage.RecursionDesired {
+				innerTesting.Fatalf("RD should be true")
 			}
 		})
+	}
+}
+
+func TestEncodeCompressesHeader(testingInstance *testing.T) {
+	queryMessage := makeMessage(testingInstance, "google.com", dns.TypeA)
+	encodedQuery, err := EncodeQuery(queryMessage)
+	if err != nil {
+		testingInstance.Fatal(err)
+	}
+	// Old legacy was 45c for google.com (28B). New minimal should be ~13c
+	if len(encodedQuery) > 30 {
+		innerTestingWarn := testingInstance
+		innerTestingWarn.Fatalf("google.com not compressed: len %d want <=30, got %q", len(encodedQuery), encodedQuery)
+	}
+	// Verify TLD dict used: com -> code 1
+	upper := strings.ToUpper(encodedQuery)
+	wireBytes, _ := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(upper)
+	if len(wireBytes) < 3 || wireBytes[0] != 0xFF || wireBytes[1] != 1 {
+		testingInstance.Fatalf("expected magic FF and TLD code 1 for com, got hex %x", wireBytes)
+	}
+}
+
+func TestTLDDictionaryFallback(testingInstance *testing.T) {
+	// Known TLD
+	knownMessage := makeMessage(testingInstance, "example.com", dns.TypeA)
+	knownEncoded, _ := EncodeQuery(knownMessage)
+	knownWire, _ := enc32NoPad.DecodeString(strings.ToUpper(knownEncoded))
+	if knownWire[1] == 0 {
+		testingInstance.Fatalf("expected dict code for com, got 0")
+	}
+	// Unknown TLD fallback
+	unknownMessage := makeMessage(testingInstance, "example.customtld999", dns.TypeA)
+	unknownEncoded, err := EncodeQuery(unknownMessage)
+	if err != nil {
+		testingInstance.Fatalf("Encode unknown: %v", err)
+	}
+	upper := strings.ToUpper(unknownEncoded)
+	unknownWire, _ := enc32NoPad.DecodeString(upper)
+	if unknownWire[1] != 0 {
+		testingInstance.Fatalf("expected raw code 0 for unknown TLD, got %d", unknownWire[1])
+	}
+	decodedUnknown, err := DecodeQuery(unknownEncoded, "")
+	if err != nil {
+		testingInstance.Fatalf("Decode unknown fallback: %v", err)
+	}
+	if !strings.EqualFold(decodedUnknown.Question[0].Name, dns.Fqdn("example.customtld999")) {
+		testingInstance.Fatalf("fallback roundtrip mismatch %q", decodedUnknown.Question[0].Name)
+	}
+	// TLD alone
+	tldOnlyMessage := makeMessage(testingInstance, "com", dns.TypeA)
+	encodedTldOnly, _ := EncodeQuery(tldOnlyMessage)
+	decodedTldOnly, err := DecodeQuery(encodedTldOnly, "")
+	if err != nil {
+		testingInstance.Fatalf("TLD only decode: %v", err)
+	}
+	if !strings.EqualFold(decodedTldOnly.Question[0].Name, dns.Fqdn("com")) {
+		testingInstance.Fatalf("tld only mismatch %q", decodedTldOnly.Question[0].Name)
 	}
 }
 
@@ -109,8 +170,9 @@ func TestDecodeQuery_SuffixAndChunking(testingInstance *testing.T) {
 	if err != nil {
 		testingInstance.Fatal(err)
 	}
+	// Minimal should keep longName under 63 most of the time; force very long to test chunking
 	if len(longEncodedQuery) <= 63 {
-		longNameFallback := strings.Repeat("longlabel", 8) + ".example.com"
+		longNameFallback := strings.Repeat("longlabel-", 10) + strings.Repeat("x", 40) + ".example.com"
 		longMessage.SetQuestion(dns.Fqdn(longNameFallback), dns.TypeA)
 		longEncodedQuery, _ = EncodeQuery(longMessage)
 	}
@@ -146,6 +208,16 @@ func TestDecodeQuery_SuffixAndChunking(testingInstance *testing.T) {
 		if bareChunked != chunkedQuery {
 			testingInstance.Fatalf("StripSuffix chunked: %q != %q", bareChunked, chunkedQuery)
 		}
+	} else {
+		// Even without chunking, verify dot-stripping works
+		dotted := longEncodedQuery[:5] + "." + longEncodedQuery[5:]
+		decodedDotted, err := DecodeQuery(dotted, "")
+		if err != nil {
+			testingInstance.Fatalf("Decode dotted minimal: %v", err)
+		}
+		if !strings.EqualFold(decodedDotted.Question[0].Name, dns.Fqdn(longMessage.Question[0].Name)) {
+			testingInstance.Fatalf("dotted mismatch")
+		}
 	}
 }
 
@@ -157,31 +229,70 @@ func TestDecodeQuery_Errors(testingInstance *testing.T) {
 		}
 	})
 
-	testingInstance.Run("wire too short", func(innerTesting *testing.T) {
-		_, err := DecodeQuery("m5xw6z3mmuxgg33n", "")
-		if err == nil || !strings.Contains(err.Error(), "wire too short") {
-			innerTesting.Fatalf("want wire too short, got %v", err)
+	testingInstance.Run("invalid magic", func(innerTesting *testing.T) {
+		// Encode legacy wire bytes without magic
+		legacyWire := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 'g', 'o', 'o', 'g', 'l', 'e', 0x00, 0x00, 0x01, 0x00, 0x01}
+		encodedLegacy := strings.ToLower(encodeBase32NoPad(legacyWire))
+		_, err := DecodeQuery(encodedLegacy, "")
+		if err == nil || !strings.Contains(err.Error(), "invalid magic") {
+			innerTesting.Fatalf("want invalid magic, got %v", err)
 		}
 	})
 
-	testingInstance.Run("empty string too short", func(innerTesting *testing.T) {
+	testingInstance.Run("reserved TLD code", func(innerTesting *testing.T) {
+		var buffer []byte
+		buffer = append(buffer, magicMinimal)
+		buffer = append(buffer, 241) // reserved
+		var tmp [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(tmp[:], 1)
+		buffer = append(buffer, tmp[:n]...)
+		buffer = append(buffer, 0) // name terminator
+		encodedReserved := strings.ToLower(encodeBase32NoPad(buffer))
+		_, err := DecodeQuery(encodedReserved, "")
+		if err == nil || !strings.Contains(err.Error(), "reserved TLD") {
+			innerTesting.Fatalf("want reserved TLD error, got %v", err)
+		}
+	})
+
+	testingInstance.Run("empty string", func(innerTesting *testing.T) {
 		_, err := DecodeQuery("", "")
-		if err == nil || !strings.Contains(err.Error(), "wire too short") && !strings.Contains(err.Error(), "base32 decode") {
-			innerTesting.Fatalf("want wire too short or decode error for empty, got %v", err)
+		if err == nil {
+			innerTesting.Fatalf("want error for empty, got nil")
 		}
 	})
 
-	testingInstance.Run("truncated wire unpack error", func(innerTesting *testing.T) {
-		queryMessage := makeMessage(innerTesting, "example.com", dns.TypeA)
-		wireBytes, _ := queryMessage.Pack()
-		truncatedWire := wireBytes[:14]
-		encodedTruncated := strings.ToLower(encodeBase32NoPad(truncatedWire))
+	testingInstance.Run("truncated varint", func(innerTesting *testing.T) {
+		var buffer []byte
+		buffer = append(buffer, magicMinimal, 1, 0xFF, 0xFF) // incomplete varint
+		buffer = append(buffer, 0)
+		encodedTruncated := strings.ToLower(encodeBase32NoPad(buffer))
 		_, err := DecodeQuery(encodedTruncated, "")
 		if err == nil {
-			innerTesting.Fatalf("want unpack error for truncated wire, got nil")
+			innerTesting.Fatalf("want varint error, got nil")
 		}
-		if !strings.Contains(err.Error(), "wire") {
-			innerTesting.Fatalf("want wire context in error, got %v", err)
+	})
+
+	testingInstance.Run("missing terminator", func(innerTesting *testing.T) {
+		var buffer []byte
+		buffer = append(buffer, magicMinimal, 1)
+		var tmp [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(tmp[:], 1)
+		buffer = append(buffer, tmp[:n]...)
+		buffer = append(buffer, 3, 'f', 'o', 'o') // missing 0 terminator
+		encodedBad := strings.ToLower(encodeBase32NoPad(buffer))
+		_, err := DecodeQuery(encodedBad, "")
+		if err == nil || !strings.Contains(err.Error(), "0-terminated") {
+			innerTesting.Fatalf("want terminator error, got %v", err)
+		}
+	})
+
+	testingInstance.Run("unsupported qclass", func(innerTesting *testing.T) {
+		queryMessage := new(dns.Msg)
+		queryMessage.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+		queryMessage.Question[0].Qclass = dns.ClassCHAOS
+		_, err := EncodeQuery(queryMessage)
+		if err == nil || !strings.Contains(err.Error(), "qclass") {
+			innerTesting.Fatalf("want qclass error, got %v", err)
 		}
 	})
 }
