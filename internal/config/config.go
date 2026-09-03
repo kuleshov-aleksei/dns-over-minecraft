@@ -34,6 +34,7 @@ type SamplePlayer struct {
 }
 
 type CacheConfig struct {
+	Disabled    bool          `yaml:"disabled"`
 	Size        int           `yaml:"size"`
 	TTL         time.Duration `yaml:"ttl"`
 	NegativeTTL time.Duration `yaml:"negativeTtl"`

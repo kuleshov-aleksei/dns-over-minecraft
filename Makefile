@@ -12,7 +12,7 @@ TYPE        ?= A
 GOFLAGS     :=
 CLIENT_LISTEN_ARGS = $(if $(CLIENT_LISTEN),-listen $(CLIENT_LISTEN),)
 
-.PHONY: help build run-server server query client client-service vet test clean docker docker-run
+.PHONY: help build run-server server query client client-service load vet test clean docker docker-run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +45,10 @@ client-service: build ## Run local DNS client service
 
 # Example: make query-custom NAME=hello.mc TYPE=TXT
 query-custom: query
+
+# Generate light DNS load (dig) against a running client service (RESOLVER, PORT, QUERIES, DELAY overridable)
+load: ## Send test queries via dig to a running client service (assumes server + client-service running)
+	./scripts/load.sh
 
 # Quick demo: start server in background, query custom records, stop
 demo: build ## Run server, query mybox.mc/hello.mc/foo.internal.mc, stop

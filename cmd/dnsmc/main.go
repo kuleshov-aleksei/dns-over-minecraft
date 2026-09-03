@@ -284,7 +284,10 @@ func runDecode(arguments []string) {
 }
 
 func buildClient(loadedConfig config.Config, servers []string, suffix string) *client.Client {
-	cacheStore := cache.New(loadedConfig.Client.Cache.Size, loadedConfig.Client.Cache.TTL, loadedConfig.Client.Cache.NegativeTTL)
+	var cacheStore *cache.Cache
+	if !loadedConfig.Client.Cache.Disabled {
+		cacheStore = cache.New(loadedConfig.Client.Cache.Size, loadedConfig.Client.Cache.TTL, loadedConfig.Client.Cache.NegativeTTL)
+	}
 	return client.New(servers, suffix, cacheStore, nil)
 }
 
@@ -329,7 +332,10 @@ func runServer(configPath, listenOverride, suffixOverride string) {
 		loadedConfig.Suffix = suffixOverride
 	}
 
-	cacheStore := cache.New(loadedConfig.Cache.Size, loadedConfig.Cache.TTL, loadedConfig.Cache.NegativeTTL)
+	var cacheStore *cache.Cache
+	if !loadedConfig.Cache.Disabled {
+		cacheStore = cache.New(loadedConfig.Cache.Size, loadedConfig.Cache.TTL, loadedConfig.Cache.NegativeTTL)
+	}
 
 	var customRecords []records.Record
 	for _, customRecord := range loadedConfig.CustomRecords {

@@ -9,6 +9,7 @@ client:
     # skipped (and logged) until a healthy one answers
     - "127.0.0.1:25565"
   cache:
+    disabled: false # set true to disable client-side caching (forward every query to a server)
     size: 2048
     ttl: 5m
     negativeTtl: 30s

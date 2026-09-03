@@ -48,6 +48,25 @@ func TestLoad_LoggingParsed(t *testing.T) {
 	}
 }
 
+func TestLoad_CacheDisabledParsed(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	yamlContent := "cache:\n  disabled: true\nclient:\n  cache:\n    disabled: true\n"
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configuration.Cache.Disabled {
+		t.Fatalf("cache.disabled should be true")
+	}
+	if !configuration.Client.Cache.Disabled {
+		t.Fatalf("client.cache.disabled should be true")
+	}
+}
+
 func TestLoad_LoggingIntervalDefaults(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.yaml")

@@ -38,7 +38,19 @@ dig @127.0.0.1 example.com A
 Client settings live under the `client:` section in `config.client.yaml.example`
 (`listen`, `servers`, `cache`). Queries rotate round-robin across the `servers`
 list and fail over to the next server when one is unreachable (each failure is
-logged). NXDOMAIN is not cached, neither on the client nor the server.
+logged). NXDOMAIN is not cached, neither on the client nor the server. To make
+the client forward every query to a server (useful when testing server stats),
+set `client.cache.disabled: true`.
+
+## Test load
+
+`make load` sends a light stream of `dig` queries to a running client service
+(default `127.0.0.1:5300`) that forwards to your server — handy for watching
+`logging.performance`/`logging.analytics`. It assumes the server and client
+service are already running (e.g. `make run-server` and
+`make client-service CLIENT_LISTEN=127.0.0.1:5300`), and with
+`client.cache.disabled: true` repeated domains reach the server and build up
+cache hits. Override with `RESOLVER=`, `PORT=`, `QUERIES=`, `DELAY=`.
 
 ## Config
 

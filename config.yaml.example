@@ -13,6 +13,7 @@ server:
       id: "00000000-0000-0000-0000-000000000002"
   favicon: "" # data:image/png;base64,...
 cache:
+  disabled: false # set true to disable server-side caching (forward every query upstream)
   size: 2048
   ttl: 5m
   negativeTtl: 30s
