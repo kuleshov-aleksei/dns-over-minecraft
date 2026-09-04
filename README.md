@@ -149,25 +149,41 @@ client:
     negativeTtl: 30s
 ```
 
-## Query it
+See `./dnsmc -h` for more subcommands (`encode`, `decode`, `hosts`).
 
-Run the client service, then point `dig` at it:
+## Install the client as a systemd service
+
+The repo ships a hardened unit file (`deploy/dnsmc-client.service`). It runs as a dedicated `dnsmc`
+user and grants `CAP_NET_BIND_SERVICE` so it can bind `127.0.0.1:53` without running as root.
+
+**1. Install the binary and the client config:**
 
 ```bash
-cp config.client.yaml.example config.client.yaml   # or paste the minimal config above
-./dnsmc -C -config config.client.yaml              # needs root for :53, or set listen to a high port
+sudo cp dnsmc /usr/local/bin/dnsmc
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin dnsmc
+sudo mkdir -p /etc/dnsmc
+sudo cp config.client.yaml /etc/dnsmc/config.client.yaml   # your client config from above
+sudo chown -R dnsmc:dnsmc /etc/dnsmc
+```
+
+**2. Install and start the unit:**
+
+```bash
+sudo cp deploy/dnsmc-client.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dnsmc-client
+systemctl status dnsmc-client   # should be "active (running)"
+```
+
+**3. Verify:**
+
+```bash
 dig @127.0.0.1 google.com A
 ```
 
-Or query a server directly from the CLI (no client service needed):
-
-```bash
-./dnsmc -server 127.0.0.1:25565 example.com A
-./dnsmc -server 127.0.0.1:25565 google.com A
-./dnsmc -server 127.0.0.1:25565 hello.mc TXT
-```
-
-See `./dnsmc -h` for more subcommands (`encode`, `decode`, `hosts`).
+The client service now starts on boot and restarts automatically on failure. Logs are visible via
+`journalctl -u dnsmc-client -f`. If your config uses a high port (e.g. `127.0.0.1:5300`) instead of
+`:53`, remove the two `AmbientCapabilities`/`CapabilityBoundingSet` lines from the unit file.
 
 ---
 
