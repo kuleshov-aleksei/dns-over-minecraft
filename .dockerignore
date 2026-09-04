@@ -1,0 +1,8 @@
+.git
+.gitignore
+dnsmc
+config.yaml
+config.client.yaml
+docs
+*.md
+TODO.md

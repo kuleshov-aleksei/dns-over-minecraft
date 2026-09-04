@@ -12,13 +12,18 @@ TYPE        ?= A
 GOFLAGS     :=
 CLIENT_LISTEN_ARGS = $(if $(CLIENT_LISTEN),-listen $(CLIENT_LISTEN),)
 
+VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE        ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS     := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
 .PHONY: help build run-server server query client client-service load vet test clean docker docker-run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build binary to ./$(BINARY)
-	go build $(GOFLAGS) -o $(BINARY) $(CMD)
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
 
 vet: ## Run go vet
 	go vet ./...
@@ -66,7 +71,7 @@ clean: ## Remove binary
 	rm -f $(BINARY) /tmp/dnsmc
 
 docker: ## Build docker image
-	docker build -t dnsmc .
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t dnsmc .
 
 docker-run: ## Run docker image (LISTEN, CONFIG)
 	docker run --rm -p 25565:25565 -v $(PWD)/$(CONFIG):/config.yaml dnsmc -S -config /config.yaml -listen $(LISTEN)

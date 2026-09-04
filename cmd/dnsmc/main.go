@@ -32,6 +32,7 @@ func main() {
 		suffixOverride = flag.String("suffix", "", "suffix override (e.g. .mc)")
 		serverAddress  = flag.String("server", "", "server addr for client query (default 127.0.0.1:25565)")
 		ipFlag         = flag.String("ip", "127.0.0.1", "IP for hosts command")
+		versionFlag    = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage:
@@ -54,6 +55,11 @@ Examples:
 `)
 	}
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("dnsmc %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
 
 	if *serverMode {
 		runServer(*configPath, *listenAddress, *suffixOverride)
