@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -20,6 +21,9 @@ type DoH struct {
 	client   *http.Client
 }
 
+// maxDoHResponseSize caps the decoded DNS response bytes from a DoH endpoint.
+const maxDoHResponseSize = 1 << 16
+
 func NewDoH(name string, url string, priority int, timeout time.Duration) *DoH {
 	if timeout == 0 {
 		timeout = 2 * time.Second
@@ -29,7 +33,22 @@ func NewDoH(name string, url string, priority int, timeout time.Duration) *DoH {
 		url:      url,
 		priority: priority,
 		timeout:  timeout,
-		client:   &http.Client{Timeout: timeout},
+		client: &http.Client{
+			Timeout: timeout,
+			// A dedicated transport with keep-alive pooling so concurrent
+			// queries reuse idle TLS connections instead of dialing fresh ones.
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				DisableCompression:    true,
+			},
+		},
 	}
 }
 
@@ -56,9 +75,15 @@ func (dohUpstream *DoH) Exchange(requestContext context.Context, queryMessage *d
 	if httpResponse.StatusCode != http.StatusOK {
 		return nil, io.ErrUnexpectedEOF
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(httpResponse.Body, 1<<16))
+	responseBody, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxDoHResponseSize))
 	if err != nil {
 		return nil, err
+	}
+	if len(responseBody) == maxDoHResponseSize {
+		// The response hit the cap; drain the remainder so the keep-alive
+		// connection stays reusable, then fail.
+		_, _ = io.Copy(io.Discard, httpResponse.Body)
+		return nil, errResponseTooLarge
 	}
 	decodedResponse := new(dns.Msg)
 	if err := decodedResponse.Unpack(responseBody); err != nil {
@@ -70,7 +95,10 @@ func (dohUpstream *DoH) Exchange(requestContext context.Context, queryMessage *d
 	return decodedResponse, nil
 }
 
-var errResponseMismatch = errors.New("doh: response does not match request")
+var (
+	errResponseMismatch = errors.New("doh: response does not match request")
+	errResponseTooLarge = errors.New("doh: response exceeds 64KiB")
+)
 
 // validateResponse checks that a decoded DNS response corresponds to the query
 // that produced it (message ID and question section). The dns.Client code paths
