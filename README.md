@@ -16,15 +16,20 @@ Outside world sees server just as a regular minecraft server - fake motd, fake p
 ## How it works
 
 ```mermaid
-flowchart LR
-    A["Apps / dig / resolv.conf"] -->|"DNS (UDP+TCP)"| CS["dnsmc client service<br/>-C · listen 127.0.0.1:53"]
-    D["dnsmc &lt;name&gt; &lt;type&gt;<br/>direct query"] -->|"Minecraft protocol"| S1
-    CS -->|"Minecraft protocol<br/>round-robin + failover"| S1["dnsmc server #1 · :25565"]
+flowchart TB
+    A["web browser / apps / dig / resolv.conf"] -->|"DNS (UDP+TCP)"| CS["dnsmc client service<br/>-C -listen 127.0.0.1:53"]
+    CS -->|"Minecraft protocol<br/>round-robin"| S1["dnsmc server #1 · :25565"]
     CS -->|"Minecraft protocol"| S2["dnsmc server #2 · :25565"]
     CS -->|"Minecraft protocol"| S3["dnsmc server #3 · :25565"]
-    S1 -->|"priority order"| U1["Upstream: 1.1.1.1 TCP"]
-    S2 -->|"priority order"| U2["Upstream: Cloudflare DoH"]
-    S3 -->|"priority order"| U3["Upstream: Google DoH"]
+    
+    S1 --> U1[["Upstream: 1.1.1.1 TCP"]]
+    S1 --> U2[["Upstream: Cloudflare DoH"]]
+
+    S2 --> U2[["Upstream: Cloudflare DoH"]]
+    S2 --> U3[["Upstream: Google DoH"]]
+
+    S3 --> U1[["Upstream: 1.1.1.1 TCP"]]
+    S3 --> U3[["Upstream: Google DoH"]]
 ```
 
 One dnsmc **client service** can talk to multiple **dnsmc servers** (round-robin, failing over to
