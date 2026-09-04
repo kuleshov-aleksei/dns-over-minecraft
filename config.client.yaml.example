@@ -13,3 +13,5 @@ client:
     size: 2048
     ttl: 5m
     negativeTtl: 30s
+  passphrase: "" # must match the server's `security.passphrase` ("" = no auth). Sent as
+                  # "p.<passphrase>." prefix in the server address; keep it 6+ lowercase alnum.

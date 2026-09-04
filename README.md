@@ -57,6 +57,25 @@ cache hits. Override with `RESOLVER=`, `PORT=`, `QUERIES=`, `DELAY=`.
 See `config.yaml.example`. `priority` high - tried first (15 before 10 before 5). Fallback sequential.
 Server logging is off by default; enable per-category with `logging.queries`, `logging.performance` (RPS + cache hit/miss rate), or `logging.analytics` (top 10 domains, all-time + last interval), reported every `logging.interval`.
 
+## Security / abuse surface
+
+By default the server binds `:25565` on all interfaces, so anyone reachable could use it as an
+anonymous DNS relay. The `security:` block tightens this:
+
+- **`passphrase`** — a shared-secret ACL. When set, every client must prefix its server address
+  with `p.<passphrase>.` (verified constant-time server-side); the matching client service sets
+  `client.passphrase`. Unauthorized clients are answered like a normal Minecraft server (vanilla
+  status + ping) and never resolve. Keep it short (e.g. 6 lowercase alphanumeric chars) — every
+  character consumes the 255-byte address budget, and it is transmitted in the plaintext handshake,
+  so treat it as a capability token, not a transport secret.
+- **`rateLimit`** — per-IP token bucket on the Minecraft port (default 100 qps, `0` disables).
+  Over-quota peers get the vanilla reply and are dropped.
+- **`maxConnections`** — a semaphore capping concurrent accepted connections (default 1024,
+  `0` disables); excess connections are rejected with the vanilla reply.
+- **`maxFrameSize`** — inbound handshake/status/ping frame payload ceiling (default 4096),
+  preventing the old 1MB-per-connection allocation; the handshake phase also has a 2s budget so
+  slowloris can't hold connections open.
+  
 ## Protocol
 
 Wire vanilla-identical: `Handshake(nextState=1) + StatusRequest`, suffix `.mc`, base32 query, compact base64 response in the Status JSON favicon.

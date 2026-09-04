@@ -13,9 +13,20 @@ type Config struct {
 	Server        ServerConfig   `yaml:"server"`
 	Client        ClientConfig   `yaml:"client"`
 	Cache         CacheConfig    `yaml:"cache"`
+	Security      SecurityConfig `yaml:"security"`
 	Logging       LoggingConfig  `yaml:"logging"`
 	Upstreams     []Upstream     `yaml:"upstreams"`
 	CustomRecords []CustomRecord `yaml:"customRecords"`
+}
+
+// SecurityConfig holds abuse-surface hardening knobs for the Minecraft port.
+// A zero value disables each control: passphrase "" = no ACL, rateLimit 0 =
+// unlimited, maxConnections 0 = unlimited, maxFrameSize 0 = default (4096).
+type SecurityConfig struct {
+	Passphrase     string `yaml:"passphrase"`
+	RateLimit      int    `yaml:"rateLimit"`
+	MaxConnections int    `yaml:"maxConnections"`
+	MaxFrameSize   int    `yaml:"maxFrameSize"`
 }
 
 type ServerConfig struct {
@@ -41,10 +52,11 @@ type CacheConfig struct {
 }
 
 type ClientConfig struct {
-	Listen  string      `yaml:"listen"`
-	Suffix  string      `yaml:"suffix"`
-	Servers []string    `yaml:"servers"`
-	Cache   CacheConfig `yaml:"cache"`
+	Listen     string      `yaml:"listen"`
+	Suffix     string      `yaml:"suffix"`
+	Servers    []string    `yaml:"servers"`
+	Cache      CacheConfig `yaml:"cache"`
+	Passphrase string      `yaml:"passphrase"`
 }
 
 type LoggingConfig struct {
@@ -97,6 +109,12 @@ func Default() Config {
 			Performance: false,
 			Analytics:   false,
 			Interval:    30 * time.Second,
+		},
+		Security: SecurityConfig{
+			Passphrase:     "",
+			RateLimit:      100,
+			MaxConnections: 1024,
+			MaxFrameSize:   4096,
 		},
 		Client: ClientConfig{
 			Listen:  "127.0.0.1:53",
@@ -176,6 +194,15 @@ func Load(configPath string) (Config, error) {
 	}
 	if configuration.Logging.Interval == 0 {
 		configuration.Logging.Interval = 30 * time.Second
+	}
+	if configuration.Security.RateLimit == 0 {
+		configuration.Security.RateLimit = 100
+	}
+	if configuration.Security.MaxConnections == 0 {
+		configuration.Security.MaxConnections = 1024
+	}
+	if configuration.Security.MaxFrameSize == 0 {
+		configuration.Security.MaxFrameSize = 4096
 	}
 	return configuration, nil
 }

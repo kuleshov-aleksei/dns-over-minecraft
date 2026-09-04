@@ -290,7 +290,23 @@ func buildClient(loadedConfig config.Config, servers []string, suffix string) *c
 	if !loadedConfig.Client.Cache.Disabled {
 		cacheStore = cache.New(loadedConfig.Client.Cache.Size, loadedConfig.Client.Cache.TTL, loadedConfig.Client.Cache.NegativeTTL)
 	}
-	return client.New(servers, suffix, cacheStore, nil)
+	return client.New(servers, suffix, loadedConfig.Client.Passphrase, cacheStore, nil)
+}
+
+// validatePassphrase enforces the shared-passphrase charset so the address
+// prefix format ("p.<passphrase>.") stays unambiguous on the wire.
+func validatePassphrase(passphrase string) {
+	if passphrase == "" {
+		return
+	}
+	if len(passphrase) > 64 {
+		log.Fatalf("passphrase too long (max 64 characters)")
+	}
+	for _, passphraseChar := range passphrase {
+		if !((passphraseChar >= 'a' && passphraseChar <= 'z') || (passphraseChar >= '0' && passphraseChar <= '9')) {
+			log.Fatalf("passphrase must be lowercase alphanumeric (a-z, 0-9), got %q", passphrase)
+		}
+	}
 }
 
 func runClientService(configPath, listenOverride, suffixOverride, serverOverride string) {
@@ -298,6 +314,7 @@ func runClientService(configPath, listenOverride, suffixOverride, serverOverride
 	if err != nil {
 		log.Fatalf("config load: %v", err)
 	}
+	validatePassphrase(loadedConfig.Client.Passphrase)
 	effectiveSuffixValue := loadedConfig.Suffix
 	if suffixOverride != "" {
 		effectiveSuffixValue = suffixOverride
@@ -327,6 +344,7 @@ func runServer(configPath, listenOverride, suffixOverride string) {
 	if err != nil {
 		log.Fatalf("config load: %v", err)
 	}
+	validatePassphrase(loadedConfig.Security.Passphrase)
 	if listenOverride != "" {
 		loadedConfig.Listen = listenOverride
 	}
@@ -400,6 +418,10 @@ func runServer(configPath, listenOverride, suffixOverride string) {
 		LogPerformance:  loadedConfig.Logging.Performance,
 		LogAnalytics:    loadedConfig.Logging.Analytics,
 		LogInterval:     loadedConfig.Logging.Interval,
+		Passphrase:      loadedConfig.Security.Passphrase,
+		RateLimit:       loadedConfig.Security.RateLimit,
+		MaxConnections:  loadedConfig.Security.MaxConnections,
+		MaxFrameSize:    loadedConfig.Security.MaxFrameSize,
 	}
 
 	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

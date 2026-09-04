@@ -9,11 +9,19 @@ import (
 
 // Frame is VarInt(length) + payload (PacketID + data)
 func ReadFrame(reader io.Reader) (packetID int, payload []byte, err error) {
+	return ReadFrameLimit(reader, 1<<20)
+}
+
+// ReadFrameLimit is ReadFrame with a configurable maximum frame payload size.
+// The Minecraft server uses a small limit for its inbound handshake/status/ping
+// frames; the client keeps a large limit because DNS responses (base64 favicon
+// payloads) can legitimately be many kilobytes.
+func ReadFrameLimit(reader io.Reader, maxFrameSize int) (packetID int, payload []byte, err error) {
 	length, _, err := ReadVarInt(reader)
 	if err != nil {
 		return 0, nil, err
 	}
-	if length <= 0 || length > 1<<20 {
+	if length <= 0 || length > maxFrameSize {
 		return 0, nil, errors.New("frame length out of bounds")
 	}
 	frameBuffer := make([]byte, length)

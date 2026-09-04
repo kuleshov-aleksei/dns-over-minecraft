@@ -2,6 +2,7 @@ package mc
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,10 +31,32 @@ type Server struct {
 	LogPerformance  bool
 	LogAnalytics    bool
 	LogInterval     time.Duration
-	fragments       *fragmentAssembler
+	// Passphrase, when non-empty, requires every client to prefix its server
+	// address with "p.<passphrase>." (see extractPassphrase). A client without
+	// the shared passphrase is treated like an unauthenticated Minecraft client.
+	Passphrase string
+	// RateLimit is the per-IP connection/queries-per-second budget; 0 disables.
+	RateLimit int
+	// MaxConnections caps concurrent accepted connections; 0 disables.
+	MaxConnections int
+	// MaxFrameSize caps inbound handshake/status/ping frame payloads; 0 uses
+	// the default (4096).
+	MaxFrameSize int
+
+	fragments   *fragmentAssembler
+	connSlots   chan struct{}
+	rateLimiter *ipRateLimiter
 }
 
-const defaultLogInterval = 30 * time.Second
+const (
+	defaultLogInterval = 30 * time.Second
+	// handshakeBudget bounds how long a connection may take to send the
+	// handshake + status request frames (slowloris defense).
+	handshakeBudget = 2 * time.Second
+	// defaultMaxFrameSize is the inbound frame payload ceiling when
+	// Server.MaxFrameSize is zero.
+	defaultMaxFrameSize = 4096
+)
 
 func (serverInstance *Server) ListenAndServe(requestContext context.Context) error {
 	listener, err := net.Listen("tcp", serverInstance.Addr)
@@ -43,6 +66,14 @@ func (serverInstance *Server) ListenAndServe(requestContext context.Context) err
 	defer listener.Close()
 	log.Printf("dnsmc server listening on %s (suffix=%q)", serverInstance.Addr, serverInstance.Suffix)
 	serverInstance.fragments = newFragmentAssembler()
+
+	if serverInstance.MaxConnections > 0 {
+		serverInstance.connSlots = make(chan struct{}, serverInstance.MaxConnections)
+	}
+	if serverInstance.RateLimit > 0 {
+		serverInstance.rateLimiter = newIPRateLimiter(serverInstance.RateLimit)
+		go serverInstance.cleanupRateLimiter(requestContext)
+	}
 
 	go func() {
 		<-requestContext.Done()
@@ -68,15 +99,48 @@ func (serverInstance *Server) ListenAndServe(requestContext context.Context) err
 				continue
 			}
 		}
-		go serverInstance.handleConn(connection)
+		if serverInstance.connSlots != nil {
+			select {
+			case serverInstance.connSlots <- struct{}{}:
+			default:
+				log.Printf("dnsmc server: rejecting connection from %s (max connections reached)", remoteIP(connection))
+				go serverInstance.rejectAndClose(connection, false)
+				continue
+			}
+		}
+		go func() {
+			if serverInstance.connSlots != nil {
+				defer func() { <-serverInstance.connSlots }()
+			}
+			serverInstance.handleConn(connection)
+		}()
+	}
+}
+
+func (serverInstance *Server) cleanupRateLimiter(requestContext context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-requestContext.Done():
+			return
+		case <-ticker.C:
+			serverInstance.rateLimiter.cleanup(5 * time.Minute)
+		}
 	}
 }
 
 func (serverInstance *Server) handleConn(connection net.Conn) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 
-	packetID, payload, err := ReadFrame(connection)
+	if serverInstance.rateLimiter != nil && !serverInstance.rateLimiter.Allow(remoteIP(connection)) {
+		log.Printf("dnsmc server: rate limit exceeded for %s", connection.RemoteAddr())
+		serverInstance.rejectAndClose(connection, false)
+		return
+	}
+	_ = connection.SetDeadline(time.Now().Add(handshakeBudget))
+
+	packetID, payload, err := ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize())
 	if err != nil {
 		return
 	}
@@ -91,7 +155,7 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 		return
 	}
 
-	packetID, payload, err = ReadFrame(connection)
+	packetID, payload, err = ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize())
 	if err != nil {
 		return
 	}
@@ -100,7 +164,18 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 	}
 	_ = payload
 
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
+
 	bareAddress := dnscodec.StripSuffix(handshake.ServerAddress, serverInstance.Suffix)
+	if serverInstance.Passphrase != "" {
+		var authenticated bool
+		bareAddress, authenticated = extractPassphrase(bareAddress, serverInstance.Passphrase)
+		if !authenticated {
+			log.Printf("dnsmc server: auth failed for %s (serverAddress=%q)", connection.RemoteAddr(), handshake.ServerAddress)
+			serverInstance.rejectAndClose(connection, true)
+			return
+		}
+	}
 	if serverInstance.isFragmented(handshake, bareAddress) {
 		serverInstance.handleFragmentConnection(connection, handshake, bareAddress)
 		return
@@ -153,6 +228,65 @@ func (serverInstance *Server) effectiveMOTD() string {
 		return serverInstance.MOTD
 	}
 	return defaultMOTD
+}
+
+// effectiveMaxFrameSize returns the inbound frame payload ceiling, defaulting to
+// defaultMaxFrameSize when not configured.
+func (serverInstance *Server) effectiveMaxFrameSize() int {
+	if serverInstance.MaxFrameSize > 0 {
+		return serverInstance.MaxFrameSize
+	}
+	return defaultMaxFrameSize
+}
+
+const passphraseMarker = "p."
+
+// extractPassphrase verifies the "p.<passphrase>." prefix on a bare (suffix
+// stripped) server address and returns the remainder on success. The comparison
+// is constant-time so an observer cannot time-guess the passphrase.
+func extractPassphrase(bareAddress, passphrase string) (string, bool) {
+	if !strings.HasPrefix(bareAddress, passphraseMarker) {
+		return "", false
+	}
+	remainder := bareAddress[len(passphraseMarker):]
+	separatorIndex := strings.IndexByte(remainder, '.')
+	if separatorIndex < 0 {
+		return "", false
+	}
+	received := remainder[:separatorIndex]
+	if subtle.ConstantTimeCompare([]byte(received), []byte(passphrase)) != 1 {
+		return "", false
+	}
+	return remainder[separatorIndex+1:], true
+}
+
+// writeVanillaStatus replies as a normal Minecraft server (vanilla status JSON +
+// ping) without resolving anything.
+func (serverInstance *Server) writeVanillaStatus(connection net.Conn) {
+	vanillaJSON := dnscodec.BuildVanillaStatusJSON(
+		serverInstance.MOTD, serverInstance.VersionName, serverInstance.VersionProtocol,
+		serverInstance.MaxPlayers, serverInstance.OnlinePlayers, serverInstance.Sample, serverInstance.Favicon,
+	)
+	_, _ = connection.Write(EncodeStatusResponseJSON(vanillaJSON))
+	serverInstance.handlePing(connection)
+}
+
+// rejectAndClose answers an unauthorized/rate-limited/capped connection as if it
+// had pinged a normal Minecraft server, then lets it close. When framesConsumed
+// is false (no handshake read yet) it first drains the handshake + status
+// request within the handshake budget so the reply is well-formed.
+func (serverInstance *Server) rejectAndClose(connection net.Conn, framesConsumed bool) {
+	defer connection.Close()
+	if !framesConsumed {
+		_ = connection.SetDeadline(time.Now().Add(handshakeBudget))
+		if _, _, err := ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize()); err != nil {
+			return
+		}
+		if _, _, err := ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize()); err != nil {
+			return
+		}
+	}
+	serverInstance.writeVanillaStatus(connection)
 }
 
 // sendDNSResponse encodes a DNS response into the compact favicon payload and
@@ -254,7 +388,7 @@ func remoteIP(connection net.Conn) string {
 
 func (serverInstance *Server) handlePing(connection net.Conn) {
 	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
-	packetID, payload, err := ReadFrame(connection)
+	packetID, payload, err := ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize())
 	if err != nil {
 		return
 	}

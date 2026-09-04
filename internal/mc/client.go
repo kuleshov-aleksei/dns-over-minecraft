@@ -21,12 +21,13 @@ const (
 	fragmentMaxLabelLength = 60
 )
 
-func Query(serverAddress string, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+func Query(serverAddress string, suffix string, passphrase string, queryMessage *dns.Msg) (*dns.Msg, error) {
 	encodedQuery, err := dnscodec.EncodeQuery(queryMessage)
 	if err != nil {
 		return nil, err
 	}
-	fullServerAddress := withSuffix(encodedQuery, suffix)
+	authPrefix := authPrefixFor(passphrase)
+	fullServerAddress := withSuffix(authPrefix+encodedQuery, suffix)
 	if len(fullServerAddress) <= maxSingleServerAddress {
 		statusResponse, err := exchange(serverAddress, fullServerAddress, 25565, queryMessage)
 		if err != nil {
@@ -34,10 +35,19 @@ func Query(serverAddress string, suffix string, queryMessage *dns.Msg) (*dns.Msg
 		}
 		return decodeStatusResponse(statusResponse, queryMessage)
 	}
-	return queryFragmented(serverAddress, suffix, encodedQuery, queryMessage)
+	return queryFragmented(serverAddress, suffix, passphrase, encodedQuery, queryMessage)
 }
 
-func queryFragmented(serverAddress string, suffix string, encodedQuery string, queryMessage *dns.Msg) (*dns.Msg, error) {
+// authPrefixFor returns the "p.<passphrase>." server-address prefix the server's
+// ACL requires, or the empty string when no passphrase is configured.
+func authPrefixFor(passphrase string) string {
+	if passphrase == "" {
+		return ""
+	}
+	return passphraseMarker + passphrase + "."
+}
+
+func queryFragmented(serverAddress string, suffix string, passphrase string, encodedQuery string, queryMessage *dns.Msg) (*dns.Msg, error) {
 	nonceBytes := make([]byte, 2)
 	if _, err := crand.Read(nonceBytes); err != nil {
 		return nil, err
@@ -48,9 +58,11 @@ func queryFragmented(serverAddress string, suffix string, encodedQuery string, q
 	if suffix != "" {
 		suffixWithDot = "." + strings.TrimPrefix(suffix, ".")
 	}
+	authPrefix := authPrefixFor(passphrase)
 	// Budget the fragment address to stay within maxSingleServerAddress,
-	// accounting for "n.<nonce>." and the dots inserted by label chunking.
-	budget := maxSingleServerAddress - len("n."+nonce+".") - len(suffixWithDot)
+	// accounting for "p.<passphrase>.", "n.<nonce>." and the dots inserted by
+	// label chunking.
+	budget := maxSingleServerAddress - len(authPrefix) - len("n."+nonce+".") - len(suffixWithDot)
 	maxPieceLength := budget * fragmentMaxLabelLength / (fragmentMaxLabelLength + 1)
 	if maxPieceLength < 40 {
 		maxPieceLength = 40
@@ -63,7 +75,7 @@ func queryFragmented(serverAddress string, suffix string, encodedQuery string, q
 
 	var finalResponse *dns.Msg
 	for index, piece := range pieces {
-		fragmentAddress := "n." + nonce + "." + chunkLabels(piece, fragmentMaxLabelLength) + suffixWithDot
+		fragmentAddress := authPrefix + "n." + nonce + "." + chunkLabels(piece, fragmentMaxLabelLength) + suffixWithDot
 		serverPort := (index+1)<<8 | len(pieces)
 		statusResponse, err := exchange(serverAddress, fragmentAddress, serverPort, queryMessage)
 		if err != nil {

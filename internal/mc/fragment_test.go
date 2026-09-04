@@ -199,7 +199,7 @@ func TestQuery_FragmentedEndToEnd(testedInstance *testing.T) {
 		testedInstance.Fatalf("test name must exceed 255 chars, got %d", len(encodedQuery))
 	}
 
-	response, err := Query(serverAddress, ".mc", queryMessage)
+	response, err := Query(serverAddress, ".mc", "", queryMessage)
 	if err != nil {
 		testedInstance.Fatalf("fragmented query: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestQuery_SingleStillWorks(testedInstance *testing.T) {
 	queryMessage.SetQuestion(dns.Fqdn("short.example.com"), dns.TypeA)
 	queryMessage.RecursionDesired = true
 
-	response, err := Query(serverAddress, ".mc", queryMessage)
+	response, err := Query(serverAddress, ".mc", "", queryMessage)
 	if err != nil {
 		testedInstance.Fatalf("single query: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestQuery_LargeTXTThroughFavicon(testedInstance *testing.T) {
 
 	queryMessage := new(dns.Msg)
 	queryMessage.SetQuestion(dns.Fqdn("big.example.com"), dns.TypeTXT)
-	response, err := Query(listener.Addr().String(), ".mc", queryMessage)
+	response, err := Query(listener.Addr().String(), ".mc", "", queryMessage)
 	if err != nil {
 		testedInstance.Fatalf("large TXT query: %v", err)
 	}

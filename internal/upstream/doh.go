@@ -3,8 +3,10 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -62,5 +64,32 @@ func (dohUpstream *DoH) Exchange(requestContext context.Context, queryMessage *d
 	if err := decodedResponse.Unpack(responseBody); err != nil {
 		return nil, err
 	}
+	if err := validateResponse(decodedResponse, queryMessage); err != nil {
+		return nil, err
+	}
 	return decodedResponse, nil
+}
+
+var errResponseMismatch = errors.New("doh: response does not match request")
+
+// validateResponse checks that a decoded DNS response corresponds to the query
+// that produced it (message ID and question section). The dns.Client code paths
+// enforce this; DoH must too, otherwise a misbehaving/malicious upstream could
+// answer a different question.
+func validateResponse(decodedResponse, queryMessage *dns.Msg) error {
+	if decodedResponse.Id != queryMessage.Id {
+		return errResponseMismatch
+	}
+	if len(decodedResponse.Question) != 1 || len(queryMessage.Question) != 1 {
+		return errResponseMismatch
+	}
+	responseQuestion := decodedResponse.Question[0]
+	queryQuestion := queryMessage.Question[0]
+	if !strings.EqualFold(dns.Fqdn(responseQuestion.Name), dns.Fqdn(queryQuestion.Name)) {
+		return errResponseMismatch
+	}
+	if responseQuestion.Qtype != queryQuestion.Qtype || responseQuestion.Qclass != queryQuestion.Qclass {
+		return errResponseMismatch
+	}
+	return nil
 }

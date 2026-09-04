@@ -49,7 +49,15 @@ func (clientInstance *Client) ListenAndServe(requestContext context.Context, lis
 
 func (clientInstance *Client) handleDNS(responseWriter dns.ResponseWriter, queryMessage *dns.Msg) {
 	queryMessage.RecursionDesired = true
-	responseMessage, _ := clientInstance.Resolve(context.Background(), queryMessage)
+	responseMessage, resolveErr := clientInstance.Resolve(context.Background(), queryMessage)
+	if resolveErr != nil {
+		log.Printf("client: resolve failed: %v", resolveErr)
+	}
+	if responseMessage == nil {
+		responseMessage = new(dns.Msg)
+		responseMessage.SetReply(queryMessage)
+		responseMessage.Rcode = dns.RcodeServerFailure
+	}
 	responseMessage.Id = queryMessage.Id
 	responseMessage.Question = queryMessage.Question
 	if writeErr := responseWriter.WriteMsg(responseMessage); writeErr != nil {

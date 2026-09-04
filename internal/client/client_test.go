@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"net"
 	"reflect"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func makeAnswer(name string, ipAddress string) dns.RR {
 }
 
 func TestClient_EmptyQuestion(testingInstance *testing.T) {
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, nil)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", nil, nil)
 	queryMessage := new(dns.Msg)
 	queryMessage.Id = 999
 	queryMessage.RecursionDesired = true
@@ -65,7 +66,7 @@ func TestClient_CacheHit(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
 		"example.com./A": makeQuery(testingInstance, "example.com", dns.TypeA, 1),
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", cacheStore, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", cacheStore, fakeQuery.Query)
 
 	queryMessageFirst := makeQuery(testingInstance, "example.com", dns.TypeA, 111)
 	answerRecord := makeAnswer("example.com", "1.1.1.1")
@@ -98,7 +99,7 @@ func TestClient_CacheMissStoresAnswer(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
 		"example.com./A": queryMessageFirst,
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", cacheStore, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", cacheStore, fakeQuery.Query)
 
 	queryMessage := makeQuery(testingInstance, "example.com", dns.TypeA, 222)
 	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
@@ -133,7 +134,7 @@ func TestClient_NXDOMAINNotCached(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
 		"nx.example.com./A": nxdomainResponse,
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", cacheStore, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", cacheStore, fakeQuery.Query)
 
 	queryMessage := makeQuery(testingInstance, "nx.example.com", dns.TypeA, 444)
 	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
@@ -160,7 +161,7 @@ func TestClient_UpstreamErrorReturnsSERVFAIL(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{errs: map[string]error{
 		"down.example.com./A": errors.New("connection refused"),
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", nil, fakeQuery.Query)
 	queryMessage := makeQuery(testingInstance, "down.example.com", dns.TypeA, 666)
 	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
 	if err == nil {
@@ -178,7 +179,7 @@ func TestClient_RoundRobin(testingInstance *testing.T) {
 	responseMessage := makeQuery(testingInstance, "rr.example.com", dns.TypeA, 1)
 	responseMessage.Answer = []dns.RR{makeAnswer("rr.example.com", "1.1.1.1")}
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{"rr.example.com./A": responseMessage}}
-	clientInstance := New([]string{"server-a:25565", "server-b:25565"}, ".mc", nil, fakeQuery.Query)
+	clientInstance := New([]string{"server-a:25565", "server-b:25565"}, ".mc", "", nil, fakeQuery.Query)
 
 	var seenServers []string
 	originalQueryFunc := clientInstance.queryFunc
@@ -215,7 +216,7 @@ func TestClient_FailoverToHealthyServer(testingInstance *testing.T) {
 		responseMessage.Question = queryMessage.Question
 		return responseMessage, nil
 	}
-	clientInstance := New([]string{"server-a:25565", "server-b:25565", "server-c:25565"}, ".mc", nil, queryFunc)
+	clientInstance := New([]string{"server-a:25565", "server-b:25565", "server-c:25565"}, ".mc", "", nil, queryFunc)
 
 	queryMessage := makeQuery(testingInstance, "failover.example.com", dns.TypeA, 800)
 	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
@@ -247,7 +248,7 @@ func TestClient_StripsOPTWhenQueryHadNoEDNS(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
 		"example.com./A": responseMessage,
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", nil, fakeQuery.Query)
 
 	responseResult, err := clientInstance.Resolve(context.Background(), queryMessage)
 	if err != nil {
@@ -267,7 +268,7 @@ func TestClient_KeepsOPTWhenQueryHadEDNS(testingInstance *testing.T) {
 	fakeQuery := &fakeQueryFunc{responses: map[string]*dns.Msg{
 		"example.com./A": responseMessage,
 	}}
-	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", nil, fakeQuery.Query)
+	clientInstance := New([]string{"127.0.0.1:25565"}, ".mc", "", nil, fakeQuery.Query)
 
 	responseResult, err := clientInstance.Resolve(context.Background(), queryMessage)
 	if err != nil {
@@ -284,7 +285,7 @@ func TestClient_AllServersFail(testingInstance *testing.T) {
 		seenServers = append(seenServers, serverAddress)
 		return nil, errors.New("connection refused")
 	}
-	clientInstance := New([]string{"server-a:25565", "server-b:25565"}, ".mc", nil, queryFunc)
+	clientInstance := New([]string{"server-a:25565", "server-b:25565"}, ".mc", "", nil, queryFunc)
 
 	queryMessage := makeQuery(testingInstance, "down.example.com", dns.TypeA, 900)
 	responseMessage, err := clientInstance.Resolve(context.Background(), queryMessage)
@@ -299,5 +300,43 @@ func TestClient_AllServersFail(testingInstance *testing.T) {
 	}
 	if !reflect.DeepEqual(seenServers, []string{"server-a:25565", "server-b:25565"}) {
 		testingInstance.Fatalf("attempts %v, want [a b]", seenServers)
+	}
+}
+
+// fakeResponseWriter is a minimal dns.ResponseWriter capturing the written message.
+type fakeResponseWriter struct {
+	message *dns.Msg
+}
+
+func (fakeInstance *fakeResponseWriter) LocalAddr() net.Addr  { return nil }
+func (fakeInstance *fakeResponseWriter) RemoteAddr() net.Addr { return nil }
+func (fakeInstance *fakeResponseWriter) WriteMsg(message *dns.Msg) error {
+	fakeInstance.message = message
+	return nil
+}
+func (fakeInstance *fakeResponseWriter) Write(buffer []byte) (int, error) { return len(buffer), nil }
+func (fakeInstance *fakeResponseWriter) Close() error                     { return nil }
+func (fakeInstance *fakeResponseWriter) TsigStatus() error                { return nil }
+func (fakeInstance *fakeResponseWriter) TsigTimersOnly(bool)              {}
+func (fakeInstance *fakeResponseWriter) Hijack()                          {}
+
+func TestHandleDNS_SERVFAILOnUpstreamError(testingInstance *testing.T) {
+	failingQuery := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		return nil, errors.New("connection refused")
+	}
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", nil, failingQuery)
+	responseWriter := &fakeResponseWriter{}
+
+	queryMessage := makeQuery(testingInstance, "down.example.com", dns.TypeA, 123)
+	clientInstance.handleDNS(responseWriter, queryMessage)
+
+	if responseWriter.message == nil {
+		testingInstance.Fatal("no response written")
+	}
+	if responseWriter.message.Rcode != dns.RcodeServerFailure {
+		testingInstance.Fatalf("want SERVFAIL, got %s", dns.RcodeToString[responseWriter.message.Rcode])
+	}
+	if responseWriter.message.Id != queryMessage.Id {
+		testingInstance.Fatalf("response id %d, want %d", responseWriter.message.Id, queryMessage.Id)
 	}
 }

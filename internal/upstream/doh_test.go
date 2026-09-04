@@ -76,6 +76,54 @@ func TestDoH_Exchange(t *testing.T) {
 	}
 }
 
+func TestDoH_RejectsResponseIDMismatch(t *testing.T) {
+	mismatchHandler := func(responseWriter http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		queryMessage := new(dns.Msg)
+		if err := queryMessage.Unpack(body); err != nil {
+			http.Error(responseWriter, "unpack", http.StatusBadRequest)
+			return
+		}
+		responseMessage := new(dns.Msg)
+		responseMessage.SetReply(queryMessage)
+		responseMessage.Id = queryMessage.Id + 1
+		responseWire, _ := responseMessage.Pack()
+		responseWriter.Header().Set("Content-Type", "application/dns-message")
+		_, _ = responseWriter.Write(responseWire)
+	}
+	testServer := newDoHTestServer(t, mismatchHandler)
+	dohUpstream := NewDoH("test-doh", testServer.URL, 10, 2*time.Second)
+	queryMessage := dohQuery(t, "example.com", dns.TypeA)
+
+	if _, err := dohUpstream.Exchange(context.Background(), queryMessage); err == nil {
+		t.Fatalf("want error on response ID mismatch, got nil")
+	}
+}
+
+func TestDoH_RejectsResponseQuestionMismatch(t *testing.T) {
+	mismatchHandler := func(responseWriter http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		queryMessage := new(dns.Msg)
+		if err := queryMessage.Unpack(body); err != nil {
+			http.Error(responseWriter, "unpack", http.StatusBadRequest)
+			return
+		}
+		responseMessage := new(dns.Msg)
+		responseMessage.SetReply(queryMessage)
+		responseMessage.Question[0].Name = "attacker.example.com."
+		responseWire, _ := responseMessage.Pack()
+		responseWriter.Header().Set("Content-Type", "application/dns-message")
+		_, _ = responseWriter.Write(responseWire)
+	}
+	testServer := newDoHTestServer(t, mismatchHandler)
+	dohUpstream := NewDoH("test-doh", testServer.URL, 10, 2*time.Second)
+	queryMessage := dohQuery(t, "example.com", dns.TypeA)
+
+	if _, err := dohUpstream.Exchange(context.Background(), queryMessage); err == nil {
+		t.Fatalf("want error on response question mismatch, got nil")
+	}
+}
+
 func TestDoH_ConcurrentExchanges(t *testing.T) {
 	testServer := newDoHTestServer(t, dohResponseHandler(t))
 	dohUpstream := NewDoH("test-doh", testServer.URL, 10, 2*time.Second)

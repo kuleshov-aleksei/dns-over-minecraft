@@ -26,12 +26,15 @@ type Client struct {
 	nextServer int
 }
 
-func New(servers []string, suffix string, cacheStore *cache.Cache, queryFunc QueryFunc) *Client {
+func New(servers []string, suffix string, passphrase string, cacheStore *cache.Cache, queryFunc QueryFunc) *Client {
 	if len(servers) == 0 {
 		servers = []string{"127.0.0.1:25565"}
 	}
 	if queryFunc == nil {
-		queryFunc = mc.Query
+		clientPassphrase := passphrase
+		queryFunc = func(serverAddress, serverSuffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+			return mc.Query(serverAddress, serverSuffix, clientPassphrase, queryMessage)
+		}
 	}
 	return &Client{cacheStore: cacheStore, servers: servers, suffix: suffix, queryFunc: queryFunc}
 }

@@ -17,6 +17,14 @@ cache:
   size: 2048
   ttl: 5m
   negativeTtl: 30s
+security:
+  passphrase: "" # shared passphrase required from clients (server ACL). Empty = open resolver.
+                  # Clients (config.client.yaml `client.passphrase`) send it as "p.<passphrase>." in the
+                  # server address. Use 6+ lowercase alphanumeric chars; keep it short, it consumes
+                  # address bytes. Zero/empty disables.
+  rateLimit: 100 # per-IP queries-per-second on the Minecraft port; 0 disables
+  maxConnections: 1024 # concurrent connection cap (slowloris defense); 0 disables
+  maxFrameSize: 4096 # inbound handshake/status/ping frame payload ceiling; 0 uses default
 # client service settings live in config.client.yaml.example
 logging:
   queries: false # log every DNS query (name, type, result rcode)

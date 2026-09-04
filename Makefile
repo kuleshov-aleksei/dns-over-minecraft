@@ -34,7 +34,7 @@ run-server: build ## Run server (CONFIG, LISTEN, SUFFIX overridable)
 server: run-server ## Alias for run-server
 
 query: build ## Query via MC ping: make query NAME=example.com TYPE=A SERVER=127.0.0.1:25565
-	./$(BINARY) -config $(CONFIG) -server $(SERVER) -suffix $(SUFFIX) $(NAME) $(TYPE)
+	./$(BINARY) -config $(CLIENT_CONFIG) -server $(SERVER) -suffix $(SUFFIX) $(NAME) $(TYPE)
 
 client: query ## Alias for query
 
