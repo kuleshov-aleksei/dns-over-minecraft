@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/list"
 	"strings"
 	"sync"
 	"time"
@@ -9,14 +10,17 @@ import (
 )
 
 type entry struct {
+	key       string
 	message   *dns.Msg
 	storedAt  time.Time
 	expiresAt time.Time
+	element   *list.Element
 }
 
 type Cache struct {
 	mutex       sync.RWMutex
 	items       map[string]*entry
+	lru         *list.List
 	ttl         time.Duration
 	negativeTTL time.Duration
 	maxSize     int
@@ -34,6 +38,7 @@ func New(cacheSize int, cacheTTL, negativeCacheTTL time.Duration) *Cache {
 	}
 	return &Cache{
 		items:       make(map[string]*entry, cacheSize),
+		lru:         list.New(),
 		ttl:         cacheTTL,
 		negativeTTL: negativeCacheTTL,
 		maxSize:     cacheSize,
@@ -45,8 +50,9 @@ func cacheKey(question dns.Question) string {
 }
 
 func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
+	key := cacheKey(question)
 	cacheInstance.mutex.RLock()
-	cachedEntry, exists := cacheInstance.items[cacheKey(question)]
+	cachedEntry, exists := cacheInstance.items[key]
 	cacheInstance.mutex.RUnlock()
 	if !exists {
 		return nil, false
@@ -54,7 +60,7 @@ func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
 	now := time.Now()
 	if now.After(cachedEntry.expiresAt) {
 		cacheInstance.mutex.Lock()
-		delete(cacheInstance.items, cacheKey(question))
+		cacheInstance.removeLocked(key)
 		cacheInstance.mutex.Unlock()
 		return nil, false
 	}
@@ -70,6 +76,9 @@ func (cacheInstance *Cache) Get(question dns.Question) (*dns.Msg, bool) {
 			resourceRecord.Header().Ttl = decrementedTTL(resourceRecord.Header().Ttl, elapsedSeconds)
 		}
 	}
+	cacheInstance.mutex.Lock()
+	cacheInstance.lru.MoveToFront(cachedEntry.element)
+	cacheInstance.mutex.Unlock()
 	copiedMessage := cachedEntry.message.Copy()
 	copiedMessage.Id = 0 // caller will set
 	return copiedMessage, true
@@ -103,15 +112,51 @@ func (cacheInstance *Cache) Set(question dns.Question, responseMessage *dns.Msg)
 	if computedTTL <= 0 {
 		computedTTL = cacheInstance.negativeTTL
 	}
-	cacheInstance.mutex.Lock()
-	defer cacheInstance.mutex.Unlock()
-	if len(cacheInstance.items) >= cacheInstance.maxSize {
-		for key := range cacheInstance.items {
-			delete(cacheInstance.items, key)
-			break
-		}
-	}
+	key := cacheKey(question)
 	copiedMessage := responseMessage.Copy()
 	now := time.Now()
-	cacheInstance.items[cacheKey(question)] = &entry{message: copiedMessage, storedAt: now, expiresAt: now.Add(computedTTL)}
+	cacheInstance.mutex.Lock()
+	defer cacheInstance.mutex.Unlock()
+	if existingEntry, exists := cacheInstance.items[key]; exists {
+		cacheInstance.lru.Remove(existingEntry.element)
+	}
+	cachedEntry := &entry{key: key, message: copiedMessage, storedAt: now, expiresAt: now.Add(computedTTL)}
+	cachedEntry.element = cacheInstance.lru.PushFront(cachedEntry)
+	cacheInstance.items[key] = cachedEntry
+	cacheInstance.evictLocked()
+}
+
+// removeLocked deletes a single entry by key, keeping the LRU list consistent.
+// Caller must hold mutex.
+func (cacheInstance *Cache) removeLocked(key string) {
+	if cachedEntry, exists := cacheInstance.items[key]; exists {
+		cacheInstance.lru.Remove(cachedEntry.element)
+		delete(cacheInstance.items, key)
+	}
+}
+
+// evictLocked drops entries until the cache fits maxSize: expired entries are
+// removed first (scanning from the least-recently-used end), then the
+// least-recently-used entry. Caller must hold mutex.
+func (cacheInstance *Cache) evictLocked() {
+	now := time.Now()
+	for len(cacheInstance.items) > cacheInstance.maxSize {
+		element := cacheInstance.lru.Back()
+		if element == nil {
+			return
+		}
+		for candidate := element; candidate != nil; candidate = candidate.Prev() {
+			if now.After(candidate.Value.(*entry).expiresAt) {
+				element = candidate
+				break
+			}
+		}
+		cacheInstance.removeElementLocked(element)
+	}
+}
+
+func (cacheInstance *Cache) removeElementLocked(element *list.Element) {
+	cachedEntry := element.Value.(*entry)
+	cacheInstance.lru.Remove(element)
+	delete(cacheInstance.items, cachedEntry.key)
 }

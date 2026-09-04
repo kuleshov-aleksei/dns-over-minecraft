@@ -211,6 +211,71 @@ func TestCache_StaleEntryMiss(testingInstance *testing.T) {
 	}
 }
 
+func TestCache_LRUEviction(testingInstance *testing.T) {
+	cacheStore := New(3, 5*time.Minute, 30*time.Second)
+	names := []string{"a.example.com", "b.example.com", "c.example.com"}
+	for index, name := range names {
+		question := makeQuestion(testingInstance, name, dns.TypeA)
+		queryMessage := new(dns.Msg)
+		queryMessage.SetQuestion(question.Name, question.Qtype)
+		queryMessage.Id = uint16(index)
+		cacheStore.Set(question, makeReply(queryMessage, dns.RcodeSuccess, nil))
+	}
+	// Touch a.example.com so it becomes the most-recently-used entry.
+	questionA := makeQuestion(testingInstance, "a.example.com", dns.TypeA)
+	if _, exists := cacheStore.Get(questionA); !exists {
+		testingInstance.Fatalf("a.example.com should be present")
+	}
+	// Insert a fourth entry: b.example.com is now least-recently-used.
+	questionD := makeQuestion(testingInstance, "d.example.com", dns.TypeA)
+	queryMessageD := new(dns.Msg)
+	queryMessageD.SetQuestion(questionD.Name, questionD.Qtype)
+	queryMessageD.Id = 3
+	cacheStore.Set(questionD, makeReply(queryMessageD, dns.RcodeSuccess, nil))
+
+	for _, name := range []string{"a.example.com", "c.example.com", "d.example.com"} {
+		if _, exists := cacheStore.Get(makeQuestion(testingInstance, name, dns.TypeA)); !exists {
+			testingInstance.Fatalf("%s should survive eviction", name)
+		}
+	}
+	if _, exists := cacheStore.Get(makeQuestion(testingInstance, "b.example.com", dns.TypeA)); exists {
+		testingInstance.Fatalf("least-recently-used b.example.com should be evicted")
+	}
+}
+
+func TestCache_ExpiredEvictedBeforeLRU(testingInstance *testing.T) {
+	cacheStore := New(2, 5*time.Minute, 30*time.Second)
+	queryMessage := new(dns.Msg)
+	queryMessage.Id = 1
+
+	questionA := makeQuestion(testingInstance, "a.example.com", dns.TypeA)
+	queryMessage.SetQuestion(questionA.Name, questionA.Qtype)
+	cacheStore.Set(questionA, makeReply(queryMessage, dns.RcodeSuccess, nil))
+
+	questionB := makeQuestion(testingInstance, "b.example.com", dns.TypeA)
+	queryMessage.SetQuestion(questionB.Name, questionB.Qtype)
+	cacheStore.Set(questionB, makeReply(queryMessage, dns.RcodeSuccess, nil))
+
+	// Expire a.example.com; it must be evicted in preference to the live but
+	// least-recently-used b.example.com when the cache overflows.
+	cacheStore.mutex.Lock()
+	cacheStore.items[cacheKey(questionA)].expiresAt = time.Now().Add(-time.Second)
+	cacheStore.mutex.Unlock()
+
+	questionC := makeQuestion(testingInstance, "c.example.com", dns.TypeA)
+	queryMessage.SetQuestion(questionC.Name, questionC.Qtype)
+	cacheStore.Set(questionC, makeReply(queryMessage, dns.RcodeSuccess, nil))
+
+	if _, exists := cacheStore.Get(questionA); exists {
+		testingInstance.Fatalf("expired a.example.com should be evicted first")
+	}
+	for _, question := range []dns.Question{questionB, questionC} {
+		if _, exists := cacheStore.Get(question); !exists {
+			testingInstance.Fatalf("%s should survive eviction", question.Name)
+		}
+	}
+}
+
 func TestCache_CaseInsensitiveKeys(testingInstance *testing.T) {
 	cacheStore := New(10, 5*time.Minute, 30*time.Second)
 	mixedCaseQuestion := makeQuestion(testingInstance, "ExAmPlE.CoM", dns.TypeA)
