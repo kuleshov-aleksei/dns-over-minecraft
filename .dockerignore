@@ -1,6 +1,8 @@
 .git
 .gitignore
+.codegraph
 dnsmc
+docker-compose.yml
 config.yaml
 config.client.yaml
 docs

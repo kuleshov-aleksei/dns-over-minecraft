@@ -1,0 +1,12 @@
+services:
+  dnsmc-server:
+    build: .
+    image: dnsmc:local
+    container_name: dnsmc-server
+    user: "1000:1000"
+    ports:
+      - "25565:25565"
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+    command: ["-S", "-config", "/config.yaml"]
+    restart: unless-stopped
