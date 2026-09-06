@@ -87,6 +87,13 @@ docker compose down
 
 ## Configure the server
 
+Use bootstrap command to quickly generate sample server with random name and random player count:
+```bash
+./bootstrap/create_server_config.sh -o config.yaml
+```
+
+OR create it manually:
+
 Minimal `config.yaml` with the essentials (MOTD, shared passphrase, upstreams, custom records):
 
 ```yaml
