@@ -97,8 +97,8 @@ server:
   versionName: "26.1.2"
   versionProtocol: 775
   maxPlayers: 20
-  onlinePlayers: 6
-  sample:
+  onlinePlayers: 6                 # peak at 18:00 UTC (dip ~half at 06:00 UTC)
+  sample:                          # must cover all possible online players
     - name: "xX_Steve_Xx"
       id: "b1f2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
     - name: "Miner_Joe"

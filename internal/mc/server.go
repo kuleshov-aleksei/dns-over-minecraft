@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"strings"
 	"time"
@@ -151,7 +152,12 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 	if err != nil {
 		return
 	}
-	if handshake.NextState != 1 {
+	switch handshake.NextState {
+	case 2:
+		serverInstance.handleLogin(connection)
+		return
+	case 1:
+	default:
 		return
 	}
 
@@ -192,11 +198,7 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 			return
 		}
 		log.Printf("vanilla ping from %s (serverAddress=%q)", connection.RemoteAddr(), handshake.ServerAddress)
-		vanillaJSON := dnscodec.BuildVanillaStatusJSON(
-			serverInstance.MOTD, serverInstance.VersionName, serverInstance.VersionProtocol,
-			serverInstance.MaxPlayers, serverInstance.OnlinePlayers, serverInstance.Sample, serverInstance.Favicon,
-		)
-		_, _ = connection.Write(EncodeStatusResponseJSON(vanillaJSON))
+		_, _ = connection.Write(EncodeStatusResponseJSON(serverInstance.vanillaStatusJSON()))
 		serverInstance.handlePing(connection)
 		return
 	}
@@ -216,6 +218,22 @@ func (serverInstance *Server) handleConn(connection net.Conn) {
 	}
 	serverInstance.sendDNSResponse(connection, responseMessage)
 	serverInstance.handlePing(connection)
+}
+
+// whitelistKickReason is the Login Disconnect reason sent to any real Minecraft
+// client that tries to join (NextState=2): the server is a DNS relay, not a
+// playable server, so nobody is whitelisted.
+const whitelistKickReason = `{"text":"You are not whitelisted"}`
+
+// handleLogin consumes a Login Start frame and kicks the client. It applies to
+// every login attempt regardless of passphrase, since dnsmc clients only ever
+// use the status flow.
+func (serverInstance *Server) handleLogin(connection net.Conn) {
+	_ = connection.SetDeadline(time.Now().Add(handshakeBudget))
+	if _, _, err := ReadFrameLimit(connection, serverInstance.effectiveMaxFrameSize()); err != nil {
+		return
+	}
+	_, _ = connection.Write(EncodeLoginDisconnect(whitelistKickReason))
 }
 
 // defaultMOTD is shown in the status description when the server has none
@@ -263,12 +281,54 @@ func extractPassphrase(bareAddress, passphrase string) (string, bool) {
 // writeVanillaStatus replies as a normal Minecraft server (vanilla status JSON +
 // ping) without resolving anything.
 func (serverInstance *Server) writeVanillaStatus(connection net.Conn) {
-	vanillaJSON := dnscodec.BuildVanillaStatusJSON(
-		serverInstance.MOTD, serverInstance.VersionName, serverInstance.VersionProtocol,
-		serverInstance.MaxPlayers, serverInstance.OnlinePlayers, serverInstance.Sample, serverInstance.Favicon,
-	)
-	_, _ = connection.Write(EncodeStatusResponseJSON(vanillaJSON))
+	_, _ = connection.Write(EncodeStatusResponseJSON(serverInstance.vanillaStatusJSON()))
 	serverInstance.handlePing(connection)
+}
+
+// vanillaStatusJSON builds the vanilla status JSON with a player count that
+// oscillates over the day (peak at 18:00 UTC, dip at 06:00 UTC) so the server
+// looks like a live Minecraft server rather than a static placeholder.
+func (serverInstance *Server) vanillaStatusJSON() []byte {
+	onlinePlayers := serverInstance.dynamicOnlinePlayers(time.Now())
+	return dnscodec.BuildVanillaStatusJSON(
+		serverInstance.MOTD, serverInstance.VersionName, serverInstance.VersionProtocol,
+		serverInstance.MaxPlayers, onlinePlayers, capSample(serverInstance.Sample, onlinePlayers), serverInstance.Favicon,
+	)
+}
+
+// dynamicOnlinePlayers returns the simulated online player count at now: a 24h
+// sinusoid peaking at OnlinePlayers at 18:00 UTC and dipping to ceil(half) at
+// 06:00 UTC. The swing never exceeds the configured player count (the configured
+// sample lists exactly those players, so no usernames need to be invented).
+func (serverInstance *Server) dynamicOnlinePlayers(now time.Time) int {
+	peak := serverInstance.OnlinePlayers
+	if peak < 0 {
+		peak = 0
+	}
+	if serverInstance.MaxPlayers > 0 && peak > serverInstance.MaxPlayers {
+		peak = serverInstance.MaxPlayers
+	}
+	dip := int(math.Ceil(float64(peak) / 2))
+	center := float64(peak+dip) / 2
+	amplitude := float64(peak-dip) / 2
+	fractionalHour := float64(now.UTC().Hour()) + float64(now.UTC().Minute())/60
+	online := int(math.Round(center + amplitude*math.Cos(2*math.Pi*(fractionalHour-18)/24)))
+	if online < 0 {
+		online = 0
+	}
+	if serverInstance.MaxPlayers > 0 && online > serverInstance.MaxPlayers {
+		online = serverInstance.MaxPlayers
+	}
+	return online
+}
+
+// capSample returns at most the first online sample entries, matching what a
+// real server reports: the player list never exceeds the online count.
+func capSample(sample []map[string]string, online int) []map[string]string {
+	if online >= len(sample) {
+		return sample
+	}
+	return sample[:online]
 }
 
 // rejectAndClose answers an unauthorized/rate-limited/capped connection as if it

@@ -5,7 +5,7 @@ server:
   versionName: "1.21.4"
   versionProtocol: 769
   maxPlayers: 20
-  onlinePlayers: 1
+  onlinePlayers: 1 # peak at 18:00 UTC (dip ~half at 06:00 UTC); sample must cover all possible players
   sample:
     - name: "§eDNS §7is §aready"
       id: "00000000-0000-0000-0000-000000000001"

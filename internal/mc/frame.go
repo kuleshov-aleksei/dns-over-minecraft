@@ -93,6 +93,12 @@ func EncodeStatusRequest() []byte {
 	return WriteFrame(0x00, []byte{})
 }
 
+// EncodeLoginDisconnect builds a clientbound Login Disconnect packet (login
+// state 0x00) carrying the given JSON chat reason.
+func EncodeLoginDisconnect(reasonJSON string) []byte {
+	return WriteFrame(0x00, WriteString(reasonJSON))
+}
+
 func DecodePing(payload []byte) (int64, error) {
 	if len(payload) != 8 {
 		return 0, errors.New("ping payload must be 8 bytes")
