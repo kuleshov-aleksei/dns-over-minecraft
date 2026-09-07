@@ -40,14 +40,13 @@ DNS providers** (plain TCP, DoT, or DoH)
 
 ## Requirements
 
-### Deploy to the server
-- **Docker compose**
-
-### Build and run as local service
-- **Go 1.26+** to build/run natively.
+- **Docker compose** for server deployment
+- **Go 1.26+** for running on local machine
 - Linux
 
 ## Run the server with Docker
+
+Real-world example of deployment using ansible can be found [here](https://github.com/kuleshov-aleksei/x-ui-ansible/blob/master/roles/dnsmc/tasks/main.yaml)
 
 The repo ships a `docker-compose.yml` that builds the image from this source and runs the server
 with your `config.yaml`
