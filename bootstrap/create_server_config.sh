@@ -4,14 +4,15 @@
 # with randomized camouflage (MOTD + player sample).
 #
 # Usage:
-#   create_server_config.sh [passphrase] [-o OUTPUT] [-f|--force] [-h|--help]
-#   create_server_config.sh -p <passphrase> [-o OUTPUT] [-f|--force]
+#   create_server_config.sh [passphrase] [-o OUTPUT] [-f|--force] [--server-only] [-h|--help]
+#   create_server_config.sh -p <passphrase> [-o OUTPUT] [-f|--force] [--server-only]
 #
 #   passphrase            Positional shared secret for security.passphrase.
 #                         If omitted, a random 6-char [a-z0-9] one is generated.
 #   -p, --passphrase PW   Same as positional arg (flag wins if both given).
 #   -o, --output FILE     Output path (default: <repo-root>/config.yaml).
 #   -f, --force           Overwrite OUTPUT if it already exists.
+#   --server-only         Emit only the server: block (omit listen, security, upstreams).
 #   --motd-file FILE      Server-name list (default: sibling server_names.txt).
 #   --players-file FILE   Player-name list (default: sibling player_names.txt).
 #
@@ -27,17 +28,19 @@ MOTD_FILE="${SCRIPT_DIR}/server_names.txt"
 PLAYERS_FILE="${SCRIPT_DIR}/player_names.txt"
 OUTPUT="${ROOT_DIR}/config.yaml"
 FORCE=0
+SERVER_ONLY=0
 PASSPHRASE=""
 POSITIONAL_PASSPHRASE=""
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     -f|--force) FORCE=1; shift ;;
+    --server-only) SERVER_ONLY=1; shift ;;
     -o|--output) OUTPUT="${2:?missing value for $1}"; shift 2 ;;
     -p|--passphrase) PASSPHRASE="${2:?missing value for $1}"; shift 2 ;;
     --motd-file) MOTD_FILE="$2"; shift 2 ;;
@@ -127,7 +130,9 @@ yaml_dq() {
 
 # --- emit minimal config ---------------------------------------------------
 {
-  echo 'listen: "0.0.0.0:25565"'
+  if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+    echo 'listen: "0.0.0.0:25565"'
+  fi
   echo 'server:'
   echo "  motd: $(yaml_dq "${MOTD}")"
   echo '  versionName: "26.1.2"'
@@ -139,21 +144,23 @@ yaml_dq() {
     echo "    - name: $(yaml_dq "${name}")"
     echo "      id: \"$(new_uuid)\""
   done
-  echo 'security:'
-  echo "  passphrase: $(yaml_dq "${PASSPHRASE}")"
-  echo '  rateLimit: 100'
-  echo '  maxConnections: 1024'
-  echo 'upstreams:'
-  echo '  - name: cloudflare-tcp'
-  echo '    type: tcp'
-  echo '    addr: "1.1.1.1:53"'
-  echo '    priority: 5'
-  echo '    timeout: 2s'
-  echo '  - name: cloudflare-doh'
-  echo '    type: doh'
-  echo '    url: "https://cloudflare-dns.com/dns-query"'
-  echo '    priority: 10'
-  echo '    timeout: 2s'
+  if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+    echo 'security:'
+    echo "  passphrase: $(yaml_dq "${PASSPHRASE}")"
+    echo '  rateLimit: 100'
+    echo '  maxConnections: 1024'
+    echo 'upstreams:'
+    echo '  - name: cloudflare-tcp'
+    echo '    type: tcp'
+    echo '    addr: "1.1.1.1:53"'
+    echo '    priority: 5'
+    echo '    timeout: 2s'
+    echo '  - name: cloudflare-doh'
+    echo '    type: doh'
+    echo '    url: "https://cloudflare-dns.com/dns-query"'
+    echo '    priority: 10'
+    echo '    timeout: 2s'
+  fi
 } > "${OUTPUT}"
 
 echo "wrote ${OUTPUT}"
