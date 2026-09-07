@@ -164,8 +164,16 @@ See `./dnsmc -h` for more subcommands (`encode`, `decode`, `hosts`).
 
 ## Install the client as a systemd service
 
-The repo ships a hardened unit file (`deploy/dnsmc-client.service`). It runs as a dedicated `dnsmc`
-user and grants `CAP_NET_BIND_SERVICE` so it can bind `127.0.0.1:53` without running as root.
+### Easy way: use makefile
+
+1. `make build`
+2. disable current system dns, e.g. `systemctl stop doh-client.service`
+3. execute `sudo make install`
+4. verify using `systemctl status dnsmc-client` and `dig google.com`
+
+### Manual way:
+
+The repo ships a unit file (`deploy/dnsmc-client.service`)
 
 **1. Install the binary and the client config:**
 

@@ -30,4 +30,5 @@ dnsmc
 !cmd/dnsmc
 config.yaml
 config.client.yaml
-TODO.md
+prod-config.client.yaml
+dev-config.client.yaml

@@ -17,13 +17,45 @@ COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE        ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help build run-server server query client client-service load vet test clean docker docker-run
+BINDIR      ?= /usr/local/bin
+UNITDIR     ?= /etc/systemd/system
+CONFDIR     ?= /etc/dnsmc
+SERVICE_SRC := deploy/dnsmc-client.service
+
+.PHONY: help build install run-server server query client client-service load vet test clean docker docker-run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build binary to ./$(BINARY)
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
+
+install: build ## Install client binary, config and systemd service (run as: sudo make install)
+	@if [ ! -f "$(SERVICE_SRC)" ]; then echo "error: $(SERVICE_SRC) not found" >&2; exit 1; fi
+	@if [ -f "$(CLIENT_CONFIG)" ]; then echo "=> using $(CLIENT_CONFIG)"; else \
+		echo "No config found. Follow instructions in README and create your config" && exit 1; \
+	fi
+	id -u dnsmc >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin dnsmc
+	install -Dm0755 $(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
+	install -Dm0644 $(SERVICE_SRC) $(DESTDIR)$(UNITDIR)/dnsmc-client.service
+	mkdir -p $(DESTDIR)$(CONFDIR)
+	SRC="$(CLIENT_CONFIG)"; \
+	if [ ! -f "$(DESTDIR)$(CONFDIR)/config.client.yaml" ]; then \
+		install -m0640 -o dnsmc -g dnsmc "$$SRC" "$(DESTDIR)$(CONFDIR)/config.client.yaml"; \
+		echo "=> installed $$SRC to $(DESTDIR)$(CONFDIR)/config.client.yaml"; \
+	else \
+		echo "=> $(DESTDIR)$(CONFDIR)/config.client.yaml exists, skipping (edit it to point at your server(s))"; \
+	fi
+	chown -R dnsmc:dnsmc $(DESTDIR)$(CONFDIR)
+	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
+		systemctl daemon-reload; \
+		systemctl enable --now dnsmc-client; \
+		systemctl status dnsmc-client --no-pager || true; \
+	else \
+		echo "=> staged install (DESTDIR set) or systemctl missing: skipping daemon-reload/enable"; \
+		echo "   on the target host run: systemctl daemon-reload && systemctl enable --now dnsmc-client"; \
+	fi
+	@echo "=> verify with: dig @127.0.0.1 google.com A"
 
 vet: ## Run go vet
 	go vet ./...
