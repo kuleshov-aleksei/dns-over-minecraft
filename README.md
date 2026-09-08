@@ -158,7 +158,31 @@ client:
     size: 2048
     ttl: 5m
     negativeTtl: 30s
+  vpnDNS:
+    allowFallbackToTunnel: true  # fall back to dnsmc servers when VPN DNS is down;
+                                 # false = SERVFAIL (no internal-name leak)
+    refreshInterval: 5           # seconds between NetworkManager DNS re-reads
 ```
+
+### VPN DNS (WireGuard)
+
+DNS servers from **active WireGuard connections** are discovered automatically
+via NetworkManager (D-Bus, read-only).
+When a WireGuard tunnel advertising DNS servers is up, the client queries those
+servers **before** the dnsmc servers, so internal records known only behind the
+tunnel resolve correctly. When no VPN is active, all queries go through the
+dnsmc servers.
+
+- `allowFallbackToTunnel: true` (default): if every VPN DNS server is
+  unreachable the query falls back to the dnsmc servers. Availability first,
+  but internal names may reach remote dnsmc servers during a VPN outage.
+- `allowFallbackToTunnel: false`: the client returns SERVFAIL instead, so
+  internal names never leak to the internet — at the cost of DNS failure until
+  the tunnel recovers.
+
+Discovery only reads NetworkManager's runtime state; it does not modify
+`/etc/resolv.conf`, `systemd-resolved`, or any network configuration. On hosts
+without NetworkManager it simply degrades to the dnsmc-only path.
 
 See `./dnsmc -h` for more subcommands (`encode`, `decode`, `hosts`).
 

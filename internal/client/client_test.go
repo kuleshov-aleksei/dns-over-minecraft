@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/cache"
+	"github.com/dns-over-minecraft/dns-over-minecraft/internal/vpndns"
 	"github.com/miekg/dns"
 )
 
@@ -338,5 +339,152 @@ func TestHandleDNS_SERVFAILOnUpstreamError(testingInstance *testing.T) {
 	}
 	if responseWriter.message.Id != queryMessage.Id {
 		testingInstance.Fatalf("response id %d, want %d", responseWriter.message.Id, queryMessage.Id)
+	}
+}
+
+// fakeVPNProvider is a minimal vpndns.Provider returning a fixed snapshot.
+type fakeVPNProvider struct {
+	servers []vpndns.Server
+}
+
+func (fakeInstance *fakeVPNProvider) Servers() []vpndns.Server {
+	return fakeInstance.servers
+}
+
+func TestClient_VPNHitUsesVPN(t *testing.T) {
+	cacheStore := cache.New(10, 5*time.Minute, 30*time.Second)
+	answer := makeQuery(t, "internal.example", dns.TypeA, 1)
+	answer.Answer = []dns.RR{makeAnswer("internal.example", "10.0.0.5")}
+
+	vpnCalls := 0
+	mcCalls := 0
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		mcCalls++
+		return nil, errors.New("should not be reached")
+	}
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", cacheStore, queryFunc)
+	clientInstance.SetVPN(&fakeVPNProvider{servers: []vpndns.Server{{Addr: "192.168.2.1:53", Priority: 0}}}, true)
+	clientInstance.vpnQuery = func(servers []vpndns.Server, queryMessage *dns.Msg) (*dns.Msg, error) {
+		vpnCalls++
+		if len(servers) != 1 || servers[0].Addr != "192.168.2.1:53" {
+			t.Fatalf("vpnQuery got servers %+v", servers)
+		}
+		response := answer.Copy()
+		response.Id = queryMessage.Id
+		response.Question = queryMessage.Question
+		return response, nil
+	}
+
+	queryMessage := makeQuery(t, "internal.example", dns.TypeA, 777)
+	response, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(response.Answer) != 1 {
+		t.Fatalf("want 1 answer, got %d", len(response.Answer))
+	}
+	if vpnCalls != 1 || mcCalls != 0 {
+		t.Fatalf("vpnCalls=%d mcCalls=%d, want 1/0", vpnCalls, mcCalls)
+	}
+}
+
+func TestClient_VPNMissFallsBackToTunnel(t *testing.T) {
+	answer := makeQuery(t, "name.example", dns.TypeA, 1)
+	answer.Answer = []dns.RR{makeAnswer("name.example", "1.1.1.1")}
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		response := answer.Copy()
+		response.Id = queryMessage.Id
+		response.Question = queryMessage.Question
+		return response, nil
+	}
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", nil, queryFunc)
+	clientInstance.SetVPN(&fakeVPNProvider{servers: []vpndns.Server{{Addr: "192.168.2.1:53", Priority: 0}}}, true)
+	clientInstance.vpnQuery = func(servers []vpndns.Server, queryMessage *dns.Msg) (*dns.Msg, error) {
+		return nil, errors.New("vpn unreachable")
+	}
+
+	queryMessage := makeQuery(t, "name.example", dns.TypeA, 778)
+	response, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+		t.Fatalf("expected tunnel fallback success, got rcode=%d answers=%d", response.Rcode, len(response.Answer))
+	}
+}
+
+func TestClient_VPNMissFailsClosedWhenNoFallback(t *testing.T) {
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		return nil, errors.New("should not be reached")
+	}
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", nil, queryFunc)
+	clientInstance.SetVPN(&fakeVPNProvider{servers: []vpndns.Server{{Addr: "192.168.2.1:53", Priority: 0}}}, false)
+	clientInstance.vpnQuery = func(servers []vpndns.Server, queryMessage *dns.Msg) (*dns.Msg, error) {
+		return nil, errors.New("vpn unreachable")
+	}
+
+	queryMessage := makeQuery(t, "internal.example", dns.TypeA, 779)
+	response, err := clientInstance.Resolve(context.Background(), queryMessage)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if response.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("fail-closed should return SERVFAIL, got %d", response.Rcode)
+	}
+}
+
+func TestClient_NoVPNUsesTunnel(t *testing.T) {
+	answer := makeQuery(t, "name.example", dns.TypeA, 1)
+	answer.Answer = []dns.RR{makeAnswer("name.example", "1.1.1.1")}
+	mcCalls := 0
+	queryFunc := func(serverAddress, suffix string, queryMessage *dns.Msg) (*dns.Msg, error) {
+		mcCalls++
+		response := answer.Copy()
+		response.Id = queryMessage.Id
+		response.Question = queryMessage.Question
+		return response, nil
+	}
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", nil, queryFunc)
+	clientInstance.SetVPN(&fakeVPNProvider{servers: nil}, true) // no VPN DNS active
+
+	queryMessage := makeQuery(t, "name.example", dns.TypeA, 780)
+	if _, err := clientInstance.Resolve(context.Background(), queryMessage); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if mcCalls != 1 {
+		t.Fatalf("expected 1 tunnel call when no VPN DNS, got %d", mcCalls)
+	}
+}
+
+func TestClient_VPNHitIsCached(t *testing.T) {
+	cacheStore := cache.New(10, 5*time.Minute, 30*time.Second)
+	answer := makeQuery(t, "cached.example", dns.TypeA, 1)
+	answer.Answer = []dns.RR{makeAnswer("cached.example", "10.0.0.9")}
+
+	vpnCalls := 0
+	clientInstance := New([]string{"server-a:25565"}, ".mc", "", cacheStore, nil)
+	clientInstance.SetVPN(&fakeVPNProvider{servers: []vpndns.Server{{Addr: "192.168.2.1:53", Priority: 0}}}, true)
+	clientInstance.vpnQuery = func(servers []vpndns.Server, queryMessage *dns.Msg) (*dns.Msg, error) {
+		vpnCalls++
+		response := answer.Copy()
+		response.Id = queryMessage.Id
+		response.Question = queryMessage.Question
+		return response, nil
+	}
+
+	queryMessageFirst := makeQuery(t, "cached.example", dns.TypeA, 781)
+	if _, err := clientInstance.Resolve(context.Background(), queryMessageFirst); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if vpnCalls != 1 {
+		t.Fatalf("expected 1 vpn call, got %d", vpnCalls)
+	}
+	// Second resolve should be a cache hit; VPN must not be called again.
+	queryMessageSecond := makeQuery(t, "cached.example", dns.TypeA, 782)
+	if _, err := clientInstance.Resolve(context.Background(), queryMessageSecond); err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if vpnCalls != 1 {
+		t.Fatalf("expected VPN not re-queried on cache hit, vpnCalls=%d", vpnCalls)
 	}
 }

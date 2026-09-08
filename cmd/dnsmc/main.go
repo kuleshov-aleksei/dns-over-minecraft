@@ -20,6 +20,7 @@ import (
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/records"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/resolver"
 	"github.com/dns-over-minecraft/dns-over-minecraft/internal/upstream"
+	"github.com/dns-over-minecraft/dns-over-minecraft/internal/vpndns"
 	"github.com/miekg/dns"
 )
 
@@ -112,6 +113,7 @@ Examples:
 		serverAddr = "127.0.0.1:25565"
 	}
 	clientInstance := buildClient(loadedConfig, []string{serverAddr}, effectiveSuffixValue)
+	attachVPN(clientInstance, loadedConfig.Client.VPNDNS, nil, false)
 
 	queryMessage := new(dns.Msg)
 	queryMessage.SetQuestion(dns.Fqdn(domainName), queryType)
@@ -340,8 +342,32 @@ func runClientService(configPath, listenOverride, suffixOverride, serverOverride
 	requestContext, cancelFunc := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancelFunc()
 
+	attachVPN(clientInstance, loadedConfig.Client.VPNDNS, requestContext, true)
+
 	if err := clientInstance.ListenAndServe(requestContext, listenAddress); err != nil {
 		log.Fatalf("client: %v", err)
+	}
+}
+
+// attachVPN discovers active VPN DNS servers via NetworkManager and configures
+// the client to query them first. For one-shot queries (startPoller=false) it
+// performs a synchronous refresh so the snapshot is ready before resolving; for
+// the client service (startPoller=true) it also starts background polling tied
+// to ctx. Failures degrade gracefully to the dnsmc-only path.
+func attachVPN(clientInstance *client.Client, vpnDNS config.VPNDNSConfig, ctx context.Context, startPoller bool) {
+	vpnProvider, err := vpndns.NewNM(nil)
+	if err != nil {
+		log.Printf("dnsmc: vpn dns discovery unavailable: %v", err)
+		return
+	}
+	servers, refreshErr := vpnProvider.Refresh()
+	if refreshErr != nil {
+		log.Printf("dnsmc: vpn dns initial refresh: %v", refreshErr)
+	}
+	log.Printf("dnsmc: vpn dns servers=%v fallback=%v", servers, vpnDNS.AllowFallbackToTunnel)
+	clientInstance.SetVPN(vpnProvider, vpnDNS.AllowFallbackToTunnel)
+	if startPoller {
+		vpnProvider.Start(ctx, vpnDNS.RefreshInterval)
 	}
 }
 

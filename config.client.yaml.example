@@ -15,3 +15,12 @@ client:
     negativeTtl: 30s
   passphrase: "duck" # must match the server's `security.passphrase` ("" = no auth). Sent as
                      # "p.<passphrase>." prefix in the server address; keep it 6+ lowercase alnum.
+  vpnDNS:
+    # DNS servers from active WireGuard VPN connections are discovered
+    # automatically via NetworkManager (D-Bus) and queried before the dnsmc
+    # servers
+    allowFallbackToTunnel: true # when every VPN DNS server is unreachable: true =
+                                # fall back to dnsmc servers (availability first);
+                                # false = return SERVFAIL so internal names never
+                                # leak to remote dnsmc servers during a VPN outage.
+    refreshInterval: 5          # seconds between NetworkManager DNS re-reads

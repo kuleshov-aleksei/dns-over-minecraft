@@ -52,11 +52,26 @@ type CacheConfig struct {
 }
 
 type ClientConfig struct {
-	Listen     string      `yaml:"listen"`
-	Suffix     string      `yaml:"suffix"`
-	Servers    []string    `yaml:"servers"`
-	Cache      CacheConfig `yaml:"cache"`
-	Passphrase string      `yaml:"passphrase"`
+	Listen     string       `yaml:"listen"`
+	Suffix     string       `yaml:"suffix"`
+	Servers    []string     `yaml:"servers"`
+	Cache      CacheConfig  `yaml:"cache"`
+	Passphrase string       `yaml:"passphrase"`
+	VPNDNS     VPNDNSConfig `yaml:"vpnDNS"`
+}
+
+// VPNDNSConfig controls discovery of DNS servers from active VPN connections.
+// VPN DNS discovery is always enabled; these knobs tune its behaviour only.
+type VPNDNSConfig struct {
+	// AllowFallbackToTunnel, when true (default), sends a query to the
+	// Minecraft dnsmc servers when every VPN DNS server is unreachable. When
+	// false the client returns SERVFAIL instead, so internal names never leak
+	// to remote dnsmc servers during a VPN outage (at the cost of DNS failure
+	// until the tunnel recovers).
+	AllowFallbackToTunnel bool `yaml:"allowFallbackToTunnel"`
+	// RefreshInterval is how often the active-VPN DNS snapshot is re-read from
+	// NetworkManager (seconds). 0 uses the default of 5s.
+	RefreshInterval int `yaml:"refreshInterval"`
 }
 
 type LoggingConfig struct {
@@ -123,6 +138,10 @@ func Default() Config {
 				Size:        2048,
 				TTL:         5 * time.Minute,
 				NegativeTTL: 30 * time.Second,
+			},
+			VPNDNS: VPNDNSConfig{
+				AllowFallbackToTunnel: true,
+				RefreshInterval:       5,
 			},
 		},
 		Upstreams: []Upstream{
@@ -191,6 +210,9 @@ func Load(configPath string) (Config, error) {
 	}
 	if configuration.Client.Cache.Size == 0 {
 		configuration.Client.Cache.Size = 2048
+	}
+	if configuration.Client.VPNDNS.RefreshInterval == 0 {
+		configuration.Client.VPNDNS.RefreshInterval = 5
 	}
 	if configuration.Logging.Interval == 0 {
 		configuration.Logging.Interval = 30 * time.Second

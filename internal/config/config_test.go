@@ -125,3 +125,50 @@ func TestLoad_SecurityParsed(t *testing.T) {
 		t.Fatalf("client.passphrase should be s3cr3t, got %q", configuration.Client.Passphrase)
 	}
 }
+
+func TestDefault_VPNDNS(t *testing.T) {
+	configuration := Default()
+	if !configuration.Client.VPNDNS.AllowFallbackToTunnel {
+		t.Fatalf("default vpnDNS.allowFallbackToTunnel should be true")
+	}
+	if configuration.Client.VPNDNS.RefreshInterval != 5 {
+		t.Fatalf("default vpnDNS.refreshInterval should be 5, got %d", configuration.Client.VPNDNS.RefreshInterval)
+	}
+}
+
+func TestLoad_VPNDNSParsed(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	yamlContent := "client:\n  vpnDNS:\n    allowFallbackToTunnel: false\n    refreshInterval: 12\n"
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.Client.VPNDNS.AllowFallbackToTunnel {
+		t.Fatalf("vpnDNS.allowFallbackToTunnel should be false")
+	}
+	if configuration.Client.VPNDNS.RefreshInterval != 12 {
+		t.Fatalf("vpnDNS.refreshInterval should be 12, got %d", configuration.Client.VPNDNS.RefreshInterval)
+	}
+}
+
+func TestLoad_VPNDNSDefaultsWhenAbsent(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("client:\n  listen: 127.0.0.1:5300\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configuration.Client.VPNDNS.AllowFallbackToTunnel {
+		t.Fatalf("vpnDNS.allowFallbackToTunnel should default to true when absent")
+	}
+	if configuration.Client.VPNDNS.RefreshInterval != 5 {
+		t.Fatalf("vpnDNS.refreshInterval should default to 5 when absent, got %d", configuration.Client.VPNDNS.RefreshInterval)
+	}
+}
