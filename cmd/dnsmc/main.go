@@ -63,11 +63,13 @@ Examples:
 	}
 
 	if *serverMode {
+		log.Printf("dnsmc server %s (commit %s, built %s)", version, commit, date)
 		runServer(*configPath, *listenAddress, *suffixOverride)
 		return
 	}
 
 	if *clientMode {
+		log.Printf("dnsmc client %s (commit %s, built %s)", version, commit, date)
 		runClientService(*configPath, *listenAddress, *suffixOverride, *serverAddress)
 		return
 	}
