@@ -93,10 +93,7 @@ func (clientInstance *Client) Resolve(requestContext context.Context, queryMessa
 	// on total failure either fall back to the Minecraft path or fail closed.
 	if clientInstance.vpnDNS != nil {
 		if vpnServers := clientInstance.vpnDNS.Servers(); len(vpnServers) > 0 {
-			log.Printf("dnsmc client: %s %s -> vpn dns (servers=%v)",
-				question.Name, dns.TypeToString[question.Qtype], vpnServers)
 			if vpnResponse, err := clientInstance.vpnQuery(vpnServers, queryMessage); err == nil {
-				log.Printf("dnsmc client: %s answered via vpn dns", question.Name)
 				if queryMessage.IsEdns0() == nil {
 					dnscodec.StripOPT(vpnResponse)
 				}
